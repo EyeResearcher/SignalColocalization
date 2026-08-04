@@ -201,6 +201,66 @@ Both flags can be combined. Segmentation plots are saved under
 saved even if the JSON sets `save_masks` to `false`, because the QC plots require
 them.
 
+## Run from Johnson Lab eLabFTW or other image pointers
+
+`run_elab_colocalization.py` is the read-only integration entry point for the
+lab website/eLabFTW deployment. It resolves individual images or groups of
+images into a temporary staging directory, runs the same configured pipeline,
+and deletes staged copies when the process exits. It never writes data back to
+eLabFTW.
+
+Connect to the JHU VPN and set the API key in the environment. Do not add the
+key to JSON, source code, notebooks, or Git:
+
+```powershell
+$env:ELAB_APIKEY = "your-api-key"
+$env:ELAB_BASE = "https://johnsonlab.wilmer.jhu.edu/api/v2" # optional; this is the default
+python run_elab_colocalization.py --smoke-test
+```
+
+The smoke test performs a single extended experiment list request and exits.
+For analysis, repeat `--source POINTER` as needed. Accepted pointers are:
+
+| Pointer | Resolves to |
+| --- | --- |
+| `experiment:42` | All supported image uploads on experiment 42 |
+| `item:9` or `resource:9` | All supported image uploads on resource 9 |
+| `upload:123` | One eLabFTW upload, independent of its parent record |
+| An eLabFTW experiment/resource/upload URL | The record group or individual upload named by the URL |
+| `file:path/to/image.oir` or a bare file path | One local microscopy image |
+| `dir:path/to/images` or a bare directory | Supported images below a local directory, recursively |
+| `glob:path/**/*.ome.tif` | Images matching a local glob |
+| `@sources.txt` | A UTF-8 manifest with one pointer per line; blank lines and `#` comments are allowed |
+
+Manifest-relative file, directory, glob, and nested-manifest paths resolve from
+the manifest's directory. Repeated or overlapping pointers are deduplicated.
+`--experiment-id`, `--item-id`, and `--upload-id` are repeatable shorthands for
+their corresponding `--source` forms.
+
+Run a mixed group using the same analysis JSON as the local CLI; its
+`input_dir` is ignored and its `output_dir` can be overridden:
+
+```powershell
+python run_elab_colocalization.py analysis_config.json `
+  --source experiment:42 `
+  --source resource:9 `
+  --source "glob:C:/microscopy/validation/*.oir" `
+  --output-dir results/combined `
+  --save-segmentation
+```
+
+Use `--inspect` to resolve and inspect image shapes/channels without running
+Cellpose. A single shorthand `--experiment-id 42` retains the filename
+`experiment_42_colocalization.xlsx`; mixed-source runs produce
+`colocalization_results.xlsx`. The workbook contains record-level custom fields,
+source-image provenance, image summaries, and per-cell measurements. Every
+analysis row carries its original pointer, upload ID and parent record when
+available. Existing CSV, mask, and optional QC outputs are retained.
+
+Tom's deployment needs the complete repository plus the packages in
+`requirements.txt`. The integration-specific addition is `openpyxl>=3.1` for
+Excel output. The server should inject `ELAB_APIKEY`; `ELAB_BASE` is optional.
+
 ## Outputs
 
 Each run writes:
