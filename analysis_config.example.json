@@ -1,0 +1,32 @@
+{
+  "input_dir": "path/to/images",
+  "output_dir": "path/to/results",
+  "reference_sets": [
+    {
+      "name": "RPBMS",
+      "channel": 3,
+      "model": "path/to/cellpose_model",
+      "diameter": null,
+      "flow_threshold": 0.4,
+      "cellprob_threshold": 0.0,
+      "min_size": 15,
+      "normalize": true
+    }
+  ],
+  "signal_channels": [
+    {
+      "name": "GD",
+      "channel": 2,
+      "threshold_method": "percentile",
+      "threshold_value": 99.5,
+      "positive_fraction_cutoff": 0.05
+    }
+  ],
+  "z_projection": "max",
+  "time_index": 0,
+  "scene_index": 0,
+  "device": "auto",
+  "recursive": false,
+  "exclude": [],
+  "save_masks": true
+}
