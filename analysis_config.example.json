@@ -5,7 +5,7 @@
     {
       "name": "RPBMS",
       "channel": 3,
-      "model": "path/to/cellpose_model",
+      "model": "cpdino_RPBMS",
       "diameter": null,
       "flow_threshold": 0.4,
       "cellprob_threshold": 0.0,

@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import tifffile
 
 from .datasets import AnalysisConfig, ReferenceSet, SignalChannel
+from .models import resolve_model_source
 from .pipeline import build_dataset, inspect_inputs, run_analysis
 from .visualization import show_segmentation
 
@@ -107,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print discovered image shapes/channels and exit without segmentation.",
     )
     parser.add_argument(
+        "--download-models",
+        action="store_true",
+        help="Download/cache configured Hugging Face models and exit.",
+    )
+    parser.add_argument(
         "--show-segmentation",
         action="store_true",
         help="Open each segmentation QC figure interactively after analysis.",
@@ -122,6 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+
+    if args.download_models:
+        for reference in config.reference_sets:
+            resolved = resolve_model_source(reference.model)
+            print(f"{reference.name}: {resolved}")
+        return 0
 
     if args.inspect:
         table = inspect_inputs(config)

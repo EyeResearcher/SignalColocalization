@@ -13,10 +13,11 @@ Required inputs:
   `.czi`, `.tif`, `.tiff`, `.ome.tif`, and `.ome.tiff`.
 - At least one **reference channel** to segment. Select it by zero-based channel
   number or, when present in the image metadata, by channel name.
-- A Cellpose model for each reference set. `model` can be a Cellpose model-zoo
-  name or the path to a custom trained model. A custom model file must be
-  available locally. A model-zoo model may be downloaded by Cellpose on first
-  use, so that first run may require internet access.
+- A Cellpose model for each reference set. The included `cpdino_BRN3A` and
+  `cpdino_RPBMS` models download automatically from Hugging Face on first use.
+  `model` can also be a Cellpose model-zoo name, local custom-model path, or
+  explicit Hugging Face model reference. The first run may require internet
+  access.
 - At least one **signal channel** to measure within the reference masks.
 - An output directory. It is created automatically if it does not exist.
 
@@ -73,7 +74,7 @@ Reference-set options:
 | --- | --- | --- |
 | `name` | yes | Unique label used in tables and filenames |
 | `channel` | yes | Zero-based index or metadata channel name |
-| `model` | yes in practice | Cellpose model-zoo name or custom model path; the code default is `cpdino_BRN3A` |
+| `model` | yes in practice | Bundled retinal-model name, `hf://` reference, Cellpose model-zoo name, or local path; default `cpdino_BRN3A` |
 | `diameter` | no | Expected object diameter in pixels; `null` lets Cellpose choose |
 | `flow_threshold` | no | Cellpose flow-error threshold; default `0.4` |
 | `cellprob_threshold` | no | Cellpose cell-probability threshold; default `0.0` |
@@ -102,6 +103,31 @@ Important analysis options include:
 
 The output directory is automatically excluded from image discovery, so an
 output directory nested beneath the input directory will not be reprocessed.
+
+### Retinal model downloads
+
+The fine-tuned weights are hosted in the public
+[mmzinn12/cellpose-retinal-models](https://huggingface.co/mmzinn12/cellpose-retinal-models)
+repository. These configuration values are recognized and downloaded
+automatically:
+
+- `cpdino_BRN3A`
+- `cpdino_RPBMS`
+
+Hugging Face stores the downloaded file in its local cache, so subsequent runs
+reuse it. If a file with the same name already exists in
+`~/.cellpose/models`, that local Cellpose copy is preferred. Each model is
+approximately 1.16 GB.
+
+An arbitrary file in another Hugging Face model repository can be selected with
+this syntax:
+
+```json
+"model": "hf://OWNER/REPOSITORY/PATH/TO/MODEL"
+```
+
+Local model paths and Cellpose built-in names such as `cpdino` and `cpsam_v2`
+continue to work normally.
 
 ## Run the notebook
 
@@ -139,6 +165,17 @@ Inspect inputs without running Cellpose:
 ```powershell
 python -m colocalize analysis_config.json --inspect
 ```
+
+Optionally download all configured Hugging Face models before starting a long
+analysis:
+
+```powershell
+python -m colocalize analysis_config.json --download-models
+```
+
+This prints the resolved local path for each reference model and exits. Model
+downloads also happen automatically during a normal analysis, so this step is
+not required.
 
 Run the analysis:
 
@@ -189,7 +226,8 @@ masks are cyan.
 - **Channel not found/out of range:** use the `--inspect` table to confirm
   zero-based indices and metadata names for every acquisition.
 - **Custom model cannot be loaded:** use the full path to the trained Cellpose
-  model and confirm that the environment can read it.
+  model and confirm that the environment can read it. For a Hugging Face model,
+  confirm internet access and that `huggingface_hub` is installed.
 - **Interactive plots do not appear:** use `--save-segmentation` on headless
   systems. On a desktop, make sure Matplotlib has an interactive GUI backend.
 - **Out of memory:** process fewer images at a time, use CPU, or reduce image

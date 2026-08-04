@@ -7,11 +7,69 @@ from pathlib import Path
 import numpy as np
 
 
+HUGGING_FACE_REPO = "mmzinn12/cellpose-retinal-models"
+HUGGING_FACE_MODELS = {
+    "cpdino_BRN3A": "cpdino_BRN3A",
+    "cpdino_RPBMS": "cpdino_RPBMS",
+}
+
+
+def resolve_model_source(model: str | Path) -> str:
+    """Return a local model path, downloading configured Hub models as needed.
+
+    Known retinal model names are downloaded from ``HUGGING_FACE_REPO``. An
+    arbitrary Hub file may be selected with
+    ``hf://OWNER/REPOSITORY/PATH/TO/FILE``. Existing local paths and Cellpose
+    built-in model names pass through unchanged.
+    """
+    value = str(model)
+    expanded = Path(value).expanduser()
+    if expanded.is_file():
+        return str(expanded)
+
+    if value.startswith("hf://"):
+        repo_id, filename = _parse_hf_uri(value)
+        return _download_model(repo_id, filename)
+
+    cached_cellpose_model = _cellpose_model_dir() / value
+    if cached_cellpose_model.is_file():
+        return str(cached_cellpose_model)
+
+    if value in HUGGING_FACE_MODELS:
+        return _download_model(HUGGING_FACE_REPO, HUGGING_FACE_MODELS[value])
+    return value
+
+
+def _download_model(repo_id: str, filename: str) -> str:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ImportError(
+            "Downloading Cellpose models from Hugging Face requires "
+            "huggingface_hub. Install the project requirements."
+        ) from exc
+    return hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
+
+
+def _parse_hf_uri(uri: str) -> tuple[str, str]:
+    parts = uri.removeprefix("hf://").strip("/").split("/")
+    if len(parts) < 3 or any(not part for part in parts):
+        raise ValueError(
+            "Hugging Face model references must use "
+            "hf://OWNER/REPOSITORY/PATH/TO/FILE."
+        )
+    return "/".join(parts[:2]), "/".join(parts[2:])
+
+
+def _cellpose_model_dir() -> Path:
+    return Path.home() / ".cellpose" / "models"
+
+
 class CellposeSegmenter:
     """Small compatibility wrapper around the Cellpose Python API."""
 
     def __init__(self, model: str | Path = "cpsam_v2", device: str = "auto") -> None:
-        self.model_name = str(model)
+        self.model_name = resolve_model_source(model)
         self.device = device
         self.model = self._load_model()
 

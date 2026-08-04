@@ -5,6 +5,7 @@ scikit-image>=0.22
 matplotlib>=3.8
 tifffile>=2024.4.24
 cellpose>=4.0
+huggingface_hub>=0.25
 bioio
 bioio-tifffile
 bioio-czi
