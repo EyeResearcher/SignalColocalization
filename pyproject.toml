@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signal-colocalization"
+version = "0.1.0"
+description = "Cellpose segmentation and per-cell signal colocalization analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.scripts]
+colocalize = "colocalize.cli:main"
+colocalize-elab = "run_elab_colocalization:main"
+colocalize-calibrate = "calibrate_colocalization_thresholds:main"
+colocalize-export-oir = "export_random_oir_max_projections:main"
+
+[tool.setuptools]
+py-modules = [
+    "run_elab_colocalization",
+    "calibrate_colocalization_thresholds",
+    "export_random_oir_max_projections",
+]
+
+[tool.setuptools.packages.find]
+include = ["colocalize*"]
+
+[tool.setuptools.package-data]
+colocalize = ["*.json"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

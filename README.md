@@ -34,26 +34,46 @@ your Python installation.
 
 ### Conda (recommended)
 
-Create and activate the environment, clone the repository, and install its
-requirements:
+From the directory where you keep projects, create the environment and clone
+the repository **once**. The `conda run` commands force installation into the
+named environment even if shell activation is not configured correctly:
 
 ```powershell
 conda create --name signal-colocalization python=3.12 -y
-conda activate signal-colocalization
-python --version
 git clone https://github.com/EyeResearcher/SignalColocalization.git
 cd SignalColocalization
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+conda run --name signal-colocalization python -m pip install --upgrade pip
+conda run --name signal-colocalization python -m pip install --editable .
+conda run --name signal-colocalization python -m colocalize --help
 ```
 
-Keep the `signal-colocalization` environment active whenever you run the
-notebook or command-line scripts. In a new terminal, reactivate it with:
+If the `SignalColocalization` directory already exists, do not run `git clone`
+again from inside it. Enter the existing repository directory and start with
+the `conda run` installation commands instead.
+
+In Google Colab, install the cloned repository and all of its dependencies into
+the active runtime with:
+
+```python
+%pip install -q -e /content/SignalColocalization/
+```
+
+The editable install means changes pulled into the repository are immediately
+used without reinstalling the `colocalize` package. Rerun the installation only
+when `requirements.txt` or `pyproject.toml` changes.
+
+Activate the environment before running notebooks or commands interactively:
 
 ```powershell
 conda activate signal-colocalization
 cd path/to/SignalColocalization
+python --version
 ```
+
+The terminal prompt should begin with `(signal-colocalization)`, and
+`python --version` should report Python 3.12 or newer. Do not install the
+requirements when the prompt still begins with `(base)`, because that can
+conflict with packages installed by Anaconda, Spyder, or other projects.
 
 If you previously created this environment with Python 3.11, upgrade it before
 installing the requirements:
@@ -63,7 +83,7 @@ conda activate signal-colocalization
 conda install python=3.12 -y
 python --version
 cd path/to/SignalColocalization
-python -m pip install -r requirements.txt
+conda run --name signal-colocalization python -m pip install --editable .
 ```
 
 ### Python virtual environment (alternative)
@@ -81,7 +101,7 @@ Windows PowerShell:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install --editable .
 ```
 
 macOS/Linux:
@@ -90,15 +110,26 @@ macOS/Linux:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install --editable .
 ```
 
 The requirements include Cellpose, PyTorch, microscopy readers, Jupyter,
-scientific Python packages, and Matplotlib. With `device="auto"`, the pipeline
+the official DINOv3 implementation required by CPDINO models, scientific Python
+packages, and Matplotlib. Because DINOv3 is installed from its GitHub repository,
+Git must be available during installation. With `device="auto"`, the pipeline
 uses CUDA when available, Apple MPS when available, and otherwise the CPU. A
 working GPU-specific PyTorch installation may need to be installed separately
 for your CUDA environment; follow the PyTorch installation instructions for the
 machine before running the analysis.
+
+If the requirements were installed before DINOv3 was added and a CPDINO model
+fails with `NameError: name 'dinov3_vitl16' is not defined`, install the missing
+dependency into the project environment and verify its import:
+
+```powershell
+conda run --name signal-colocalization python -m pip install "git+https://github.com/facebookresearch/dinov3.git@6876159a11b4df116f30f667f8c9888617df0751"
+conda run --name signal-colocalization python -c "from dinov3.hub.backbones import dinov3_vitl16; print('DINOv3 ready')"
+```
 
 Confirm that the command-line interface is available:
 

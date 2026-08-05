@@ -6,6 +6,7 @@ scikit-image>=0.22
 matplotlib>=3.8
 tifffile>=2024.4.24
 cellpose>=4.0
+dinov3 @ git+https://github.com/facebookresearch/dinov3.git@6876159a11b4df116f30f667f8c9888617df0751
 huggingface_hub>=0.25
 bioio
 bioio-tifffile
