@@ -11,5 +11,5 @@ huggingface_hub>=0.25
 bioio
 bioio-tifffile
 bioio-czi
-oirfile>=2026.3.28
+oirfile==2026.7.28
 ipykernel>=6.29
