@@ -28,8 +28,52 @@ input image.
 
 ## Setup
 
-Clone or download the repository, open a terminal in its root directory, and
-create a virtual environment. Python 3.10 or newer is recommended.
+Python 3.12 or newer is required. The recommended setup uses a dedicated
+Conda environment so the analysis dependencies remain isolated from the rest of
+your Python installation.
+
+### Conda (recommended)
+
+Create and activate the environment, clone the repository, and install its
+requirements:
+
+```powershell
+conda create --name signal-colocalization python=3.12 -y
+conda activate signal-colocalization
+python --version
+git clone https://github.com/EyeResearcher/SignalColocalization.git
+cd SignalColocalization
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Keep the `signal-colocalization` environment active whenever you run the
+notebook or command-line scripts. In a new terminal, reactivate it with:
+
+```powershell
+conda activate signal-colocalization
+cd path/to/SignalColocalization
+```
+
+If you previously created this environment with Python 3.11, upgrade it before
+installing the requirements:
+
+```powershell
+conda activate signal-colocalization
+conda install python=3.12 -y
+python --version
+cd path/to/SignalColocalization
+python -m pip install -r requirements.txt
+```
+
+### Python virtual environment (alternative)
+
+If Conda is not installed, first clone the repository and enter it:
+
+```powershell
+git clone https://github.com/EyeResearcher/SignalColocalization.git
+cd SignalColocalization
+```
 
 Windows PowerShell:
 
@@ -155,10 +199,37 @@ Python transforms beyond the command-line `z_projection` choices.
 
 ## Run from the command line
 
-Copy [analysis_config.example.json](analysis_config.example.json), rename it,
-and edit its paths, channels, model, and thresholds. Relative `input_dir` and
-`output_dir` values are resolved relative to the JSON file. Use forward slashes,
-escaped backslashes, or absolute paths in JSON.
+The JSON configuration is optional. A single-reference, single-signal analysis
+can be configured entirely with command-line arguments:
+
+```powershell
+python -m colocalize `
+  --input-dir "path/to/images" `
+  --output-dir "path/to/results" `
+  --reference-name RPBMS `
+  --reference-channel 3 `
+  --model cpdino_RPBMS `
+  --signal-name GD `
+  --signal-channel 2 `
+  --threshold-method percentile `
+  --threshold-value 99.5 `
+  --positive-fraction-cutoff 0.05
+```
+
+Every serializable analysis setting has a command-line option. Run
+`python -m colocalize --help` for the complete list. When omitted, the primary
+defaults are input directory `.`, output directory `results`, reference channel
+`0`, model `cpdino_BRN3A`, signal channel `1`, Otsu thresholding, max Z
+projection, automatic device selection, and saved masks.
+
+Inspect inputs without running Cellpose by adding `--inspect`, or download the
+selected model and exit by adding `--download-models`.
+
+For multiple reference sets or signal channels, copy
+[analysis_config.example.json](analysis_config.example.json), rename it, and
+edit its values. Relative `input_dir` and `output_dir` values are resolved
+relative to the JSON file. Explicit command-line options override JSON values;
+reference or signal options override the first corresponding entry.
 
 Inspect inputs without running Cellpose:
 
