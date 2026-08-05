@@ -28,6 +28,7 @@ def resolve_sources(
     destination: str | Path,
     *,
     client: ElabClient | None = None,
+    extensions: Iterable[str] = SUPPORTED_EXTENSIONS,
 ) -> ResolvedSources:
     """Resolve record, upload, URL, path, glob, and manifest pointers."""
     expanded = _expand_manifests(list(pointers))
@@ -51,7 +52,9 @@ def resolve_sources(
                 upload_id = int(value)
                 if upload_id in remote_upload_ids:
                     continue
-                found = client.download_upload_ids([upload_id], destination, used_names=used_names)
+                found = client.download_upload_ids(
+                    [upload_id], destination, used_names=used_names, extensions=extensions
+                )
                 images.extend(found)
                 remote_upload_ids.update(source.upload_id for source in found if source.upload_id is not None)
                 continue
@@ -69,12 +72,13 @@ def resolve_sources(
                 used_names=used_names,
                 exclude_upload_ids=remote_upload_ids,
                 record=record,
+                extensions=extensions,
             )
             images.extend(found)
             remote_upload_ids.update(source.upload_id for source in found if source.upload_id is not None)
             continue
 
-        for path in _local_paths(kind, value):
+        for path in _local_paths(kind, value, extensions):
             resolved = path.resolve()
             if resolved in local_paths:
                 continue
@@ -152,7 +156,7 @@ def _parse_elab_url(pointer: str) -> tuple[str, str]:
     raise ElabError(f"URL does not identify an eLabFTW experiment, resource, or upload: {pointer!r}.")
 
 
-def _local_paths(kind: str, value: str) -> list[Path]:
+def _local_paths(kind: str, value: str, extensions: Iterable[str]) -> list[Path]:
     if kind == "file":
         paths = [Path(value)]
     elif kind == "dir":
@@ -165,7 +169,7 @@ def _local_paths(kind: str, value: str) -> list[Path]:
         paths = [path for path in paths if path.is_file()]
     else:
         raise ElabError(f"Unsupported local source type: {kind!r}.")
-    supported = [path for path in paths if _supported(path.name)]
+    supported = [path for path in paths if _supported(path.name, extensions)]
     if kind == "file" and (not paths[0].is_file() or not supported):
         raise ElabError(f"Not a supported microscopy image: {paths[0]}.")
     return sorted(supported, key=lambda path: str(path).casefold())
@@ -211,9 +215,9 @@ def _manifest_relative(pointer: str, base: Path) -> str:
     return str(base / pointer) if not Path(pointer).is_absolute() else pointer
 
 
-def _supported(filename: str) -> bool:
+def _supported(filename: str, extensions: Iterable[str] = SUPPORTED_EXTENSIONS) -> bool:
     folded = filename.casefold()
-    return any(folded.endswith(extension.casefold()) for extension in SUPPORTED_EXTENSIONS)
+    return any(folded.endswith(extension.casefold()) for extension in extensions)
 
 
 def _unique_local_name(filename: str, used: set[str]) -> str:

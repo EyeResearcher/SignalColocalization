@@ -100,6 +100,7 @@ class ElabClient:
         used_names: set[str] | None = None,
         exclude_upload_ids: Iterable[int] | None = None,
         record: dict[str, Any] | None = None,
+        extensions: Iterable[str] = SUPPORTED_EXTENSIONS,
     ) -> list[DownloadedUpload]:
         """Download supported microscopy attachments from an experiment/resource."""
         destination = Path(destination)
@@ -118,7 +119,7 @@ class ElabClient:
             if selected_ids and upload_id not in selected_ids:
                 continue
             original_name = _upload_name(upload)
-            if not _is_supported_image(original_name):
+            if not _is_supported_image(original_name, extensions):
                 continue
             safe_name = _unique_filename(original_name, upload_id, used_names)
             local_path = destination / safe_name
@@ -152,6 +153,7 @@ class ElabClient:
         destination: str | Path,
         *,
         used_names: set[str] | None = None,
+        extensions: Iterable[str] = SUPPORTED_EXTENSIONS,
     ) -> list[DownloadedUpload]:
         """Download individual uploads selected independently of a parent record."""
         selected = set(upload_ids)
@@ -166,7 +168,7 @@ class ElabClient:
             if upload_id not in selected:
                 continue
             original_name = _upload_name(upload)
-            if not _is_supported_image(original_name):
+            if not _is_supported_image(original_name, extensions):
                 continue
             local_path = destination / _unique_filename(original_name, upload_id, used_names)
             local_path.write_bytes(self._bytes(f"uploads/{upload_id}", params={"format": "binary"}))
@@ -379,9 +381,9 @@ def _upload_name(upload: dict[str, Any]) -> str:
     raise ElabError(f"eLabFTW upload {_upload_id(upload)} is missing a filename.")
 
 
-def _is_supported_image(filename: str) -> bool:
+def _is_supported_image(filename: str, extensions: Iterable[str] = SUPPORTED_EXTENSIONS) -> bool:
     folded = filename.casefold()
-    return any(folded.endswith(extension.casefold()) for extension in SUPPORTED_EXTENSIONS)
+    return any(folded.endswith(extension.casefold()) for extension in extensions)
 
 
 def _unique_filename(filename: str, upload_id: int, used: set[str]) -> str:

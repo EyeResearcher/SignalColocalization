@@ -261,6 +261,34 @@ Tom's deployment needs the complete repository plus the packages in
 `requirements.txt`. The integration-specific addition is `openpyxl>=3.1` for
 Excel output. The server should inject `ELAB_APIKEY`; `ELAB_BASE` is optional.
 
+### eLab-facing configuration form
+
+[web/colocalization_configurator.html](web/colocalization_configurator.html) is
+a self-contained interface Tom can place in the lab website or adapt to its
+house style. It exposes repeatable image sources, every reference-set and
+signal-channel setting, acquisition selection, projection, compute device,
+file discovery, masks, QC, inspection mode, and output location. It never asks
+for an API key.
+
+The form downloads a versioned `colocalization_job.json`. Run that exact job
+without translating it into a second configuration format:
+
+```powershell
+python run_elab_colocalization.py --job colocalization_job.json
+```
+
+The formal interface contract is
+[colocalize/colocalization_job.schema.json](colocalize/colocalization_job.schema.json).
+Website code can use it to generate or validate another UI, and the deployed
+runner can expose it directly:
+
+```powershell
+python run_elab_colocalization.py --print-schema
+```
+
+Legacy `analysis_config.json` plus command-line source arguments remains
+supported. A job file and legacy config cannot be supplied together.
+
 ## Outputs
 
 Each run writes:

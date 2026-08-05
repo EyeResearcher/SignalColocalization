@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://johnsonlab.wilmer.jhu.edu/schemas/colocalization-job.schema.json",
+  "title": "Johnson Lab colocalization job",
+  "description": "Complete user-submittable request for source resolution, Cellpose segmentation, colocalization measurement, and workbook output.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sources", "analysis"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "experiment:ID, item:ID, upload:ID, eLabFTW URL, local file/directory/glob, or @manifest pointer."
+      }
+    },
+    "analysis": {
+      "$ref": "#/$defs/analysis"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inspect": {"type": "boolean", "default": false},
+        "save_segmentation": {"type": "boolean", "default": true}
+      }
+    }
+  },
+  "$defs": {
+    "channel": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0, "title": "Zero-based index"},
+        {"type": "string", "minLength": 1, "title": "Metadata channel name"}
+      ]
+    },
+    "reference_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "channel", "model"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "channel": {"$ref": "#/$defs/channel"},
+        "model": {"type": "string", "minLength": 1, "default": "cpdino_BRN3A"},
+        "diameter": {"type": ["number", "null"], "exclusiveMinimum": 0, "default": null},
+        "flow_threshold": {"type": "number", "default": 0.4},
+        "cellprob_threshold": {"type": "number", "default": 0.0},
+        "min_size": {"type": "integer", "minimum": 0, "default": 15},
+        "normalize": {"type": "boolean", "default": true}
+      }
+    },
+    "signal_channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "channel"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "channel": {"$ref": "#/$defs/channel"},
+        "threshold_method": {
+          "type": "string",
+          "enum": ["otsu", "percentile", "absolute", "none"],
+          "default": "otsu"
+        },
+        "threshold_value": {"type": ["number", "null"], "default": null},
+        "positive_fraction_cutoff": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.8}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"threshold_method": {"const": "absolute"}}, "required": ["threshold_method"]},
+          "then": {"required": ["threshold_value"], "properties": {"threshold_value": {"type": "number"}}}
+        }
+      ]
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_dir", "reference_sets", "signal_channels"],
+      "properties": {
+        "input_dir": {
+          "type": "string",
+          "default": ".",
+          "description": "Legacy local-run field; source pointers replace it in interface jobs."
+        },
+        "output_dir": {"type": "string", "minLength": 1, "default": "results"},
+        "reference_sets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/reference_set"}
+        },
+        "signal_channels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/signal_channel"}
+        },
+        "extensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^\\."},
+          "default": [".oir", ".czi", ".tif", ".tiff", ".ome.tif", ".ome.tiff"]
+        },
+        "recursive": {"type": "boolean", "default": false},
+        "exclude": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": []
+        },
+        "time_index": {"type": "integer", "minimum": 0, "default": 0},
+        "scene_index": {"type": "integer", "minimum": 0, "default": 0},
+        "z_projection": {"type": "string", "enum": ["max", "mean", "first"], "default": "max"},
+        "device": {
+          "type": "string",
+          "pattern": "^(auto|cpu|mps|cuda(:[0-9]+)?)$",
+          "default": "auto"
+        },
+        "save_masks": {"type": "boolean", "default": true}
+      }
+    }
+  }
+}

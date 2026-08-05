@@ -20,6 +20,13 @@ def load_config(path: str | Path) -> AnalysisConfig:
     path = Path(path)
     with path.open(encoding="utf-8") as stream:
         values = json.load(stream)
+    return config_from_mapping(values, base_dir=path.parent)
+
+
+def config_from_mapping(values: dict, *, base_dir: str | Path = ".") -> AnalysisConfig:
+    """Build an analysis configuration from a JSON-compatible mapping."""
+    values = dict(values)
+    base_dir = Path(base_dir)
 
     try:
         references = [ReferenceSet(**item) for item in values.pop("reference_sets")]
@@ -32,7 +39,7 @@ def load_config(path: str | Path) -> AnalysisConfig:
             raise ValueError(f"Configuration is missing required field {key!r}.")
         candidate = Path(values[key])
         if not candidate.is_absolute():
-            values[key] = path.parent / candidate
+            values[key] = base_dir / candidate
 
     if "extensions" in values:
         values["extensions"] = tuple(values["extensions"])
