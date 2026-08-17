@@ -13,6 +13,7 @@ from .colocalize import measure_masks, summarize_cells
 from .datasets import AnalysisConfig, AnalysisResult, ImageDataset
 from .models import CellposeSegmenter
 from .readers import ImageReader, discover_images
+from .visualization import save_segmentation_views
 
 
 def inspect_inputs(config: AnalysisConfig) -> pd.DataFrame:
@@ -45,6 +46,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     segmenters: dict[str, CellposeSegmenter] = {}
     tables: list[pd.DataFrame] = []
     mask_paths: list[Path] = []
+    segmentation_paths: list[Path] = []
     analyzed_groups: list[dict[str, str]] = []
 
     for acquisition in build_dataset(config, paths):
@@ -87,6 +89,33 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                 tifffile.imwrite(destination, masks, compression="zlib")
                 mask_paths.append(destination)
 
+            if config.save_segmentation:
+                qc_dir = (
+                    config.segmentation_output_dir
+                    if config.segmentation_output_dir is not None
+                    else config.output_dir / "segmentation_qc"
+                )
+                for signal_spec in config.signal_channels:
+                    name = (
+                        f"{_safe_name(_safe_stem(path))}__"
+                        f"{_safe_name(reference.name)}__"
+                        f"{_safe_name(signal_spec.name)}_segmentation"
+                    )
+                    segmentation_paths.extend(
+                        save_segmentation_views(
+                            reference_image,
+                            masks,
+                            signals[signal_spec.name],
+                            output_dir=qc_dir,
+                            name=name,
+                            signal_spec=signal_spec,
+                            title=(
+                                f"{path.name} | reference={reference.name} | "
+                                f"signal={signal_spec.name}"
+                            ),
+                        )
+                    )
+
     cells = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
     groups = pd.DataFrame(analyzed_groups)
     images = groups.merge(
@@ -104,7 +133,12 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             images[column] = 0
     images["cell_count"] = images["cell_count"].fillna(0).astype(int)
     images["total_cell_area_px"] = images["total_cell_area_px"].fillna(0).astype(int)
-    result = AnalysisResult(cells=cells, images=images, mask_paths=mask_paths)
+    result = AnalysisResult(
+        cells=cells,
+        images=images,
+        mask_paths=mask_paths,
+        segmentation_paths=segmentation_paths,
+    )
     result.save_tables(config.output_dir)
     return result
 
@@ -164,3 +198,10 @@ def _safe_stem(path: Path) -> str:
         if name.casefold().endswith(suffix):
             return name[: -len(suffix)]
     return path.stem
+
+
+def _safe_name(value: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in value
+    )

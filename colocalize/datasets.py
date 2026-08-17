@@ -102,11 +102,16 @@ class AnalysisConfig:
     z_projection: str = "max"
     device: str = "auto"
     save_masks: bool = True
+    save_segmentation: bool = False
+    segmentation_output_dir: str | Path | None = None
     transforms: Sequence[ArrayTransform] | None = None
 
     def __post_init__(self) -> None:
         self.input_dir = Path(self.input_dir)
         self.output_dir = Path(self.output_dir)
+        if self.segmentation_output_dir is not None:
+            self.segmentation_output_dir = Path(self.segmentation_output_dir)
+            self.save_segmentation = True
         if isinstance(self.exclude, (str, Path)):
             self.exclude = (self.exclude,)
         else:
@@ -137,6 +142,7 @@ class AnalysisResult:
     cells: pd.DataFrame
     images: pd.DataFrame
     mask_paths: list[Path] = field(default_factory=list)
+    segmentation_paths: list[Path] = field(default_factory=list)
 
     def save_tables(self, output_dir: str | Path) -> tuple[Path, Path]:
         output_dir = Path(output_dir)

@@ -13,7 +13,7 @@ import tifffile
 from .datasets import AnalysisConfig, ReferenceSet, SignalChannel
 from .models import resolve_model_source
 from .pipeline import build_dataset, inspect_inputs, run_analysis
-from .visualization import show_segmentation
+from .visualization import save_segmentation_views, show_segmentation
 
 
 CLI_DEFAULTS = {
@@ -39,6 +39,8 @@ CLI_DEFAULTS = {
     "z_projection": "max",
     "device": "auto",
     "save_masks": True,
+    "save_segmentation": False,
+    "segmentation_output_dir": None,
 }
 
 
@@ -68,6 +70,11 @@ def config_from_mapping(values: dict, *, base_dir: str | Path = ".") -> Analysis
         if not candidate.is_absolute():
             values[key] = base_dir / candidate
 
+    if values.get("segmentation_output_dir") is not None:
+        candidate = Path(values["segmentation_output_dir"])
+        if not candidate.is_absolute():
+            values["segmentation_output_dir"] = base_dir / candidate
+
     if "extensions" in values:
         values["extensions"] = tuple(values["extensions"])
     return AnalysisConfig(
@@ -83,12 +90,11 @@ def save_or_show_segmentations(
     *,
     show: bool = False,
     save: bool = False,
+    output_dir: str | Path | None = None,
 ) -> list[Path]:
-    """Render QC figures for every image/reference/signal combination."""
+    """Render and optionally save QC grids and their individual panels."""
     if not show and not save:
         return []
-    if save and not show:
-        plt.switch_backend("Agg")
 
     expected = len(build_dataset(config)) * len(config.reference_sets)
     if len(mask_paths) != expected:
@@ -97,7 +103,11 @@ def save_or_show_segmentations(
             f"reference set; expected {expected}, found {len(mask_paths)}."
         )
 
-    qc_dir = config.output_dir / "segmentation_qc"
+    qc_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else config.output_dir / "segmentation_qc"
+    )
     if save:
         qc_dir.mkdir(parents=True, exist_ok=True)
 
@@ -109,27 +119,38 @@ def save_or_show_segmentations(
             mask_index += 1
             reference_image = acquisition.channel(reference.channel)
             for signal_spec in config.signal_channels:
-                figure = show_segmentation(
-                    reference_image,
-                    masks,
-                    acquisition.channel(signal_spec.channel),
-                    signal_spec=signal_spec,
-                    title=(
-                        f"{acquisition.path.name} | reference={reference.name} | "
-                        f"signal={signal_spec.name}"
-                    ),
+                signal_image = acquisition.channel(signal_spec.channel)
+                title = (
+                    f"{acquisition.path.name} | reference={reference.name} | "
+                    f"signal={signal_spec.name}"
+                )
+                name = (
+                    f"{_safe_name(acquisition.path.stem)}__"
+                    f"{_safe_name(reference.name)}__"
+                    f"{_safe_name(signal_spec.name)}_segmentation"
                 )
                 if save:
-                    destination = qc_dir / (
-                        f"{_safe_name(acquisition.path.stem)}__"
-                        f"{_safe_name(reference.name)}__"
-                        f"{_safe_name(signal_spec.name)}_segmentation.png"
+                    saved.extend(
+                        save_segmentation_views(
+                            reference_image,
+                            masks,
+                            signal_image,
+                            output_dir=qc_dir,
+                            name=name,
+                            signal_spec=signal_spec,
+                            title=title,
+                        )
                     )
-                    figure.savefig(destination, dpi=150, bbox_inches="tight")
-                    saved.append(destination)
                 if show:
+                    figure = show_segmentation(
+                        reference_image,
+                        masks,
+                        signal_image,
+                        signal_spec=signal_spec,
+                        title=title,
+                    )
                     plt.show()
-                plt.close(figure)
+                    plt.close(figure)
     return saved
 
 
@@ -162,8 +183,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--save-segmentation",
-        action="store_true",
-        help="Save segmentation QC PNGs under OUTPUT_DIR/segmentation_qc.",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="Save the QC grid and its four panels as PNGs.",
+    )
+    parser.add_argument(
+        "--segmentation-output-dir",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help=(
+            "Directory for saved segmentation grids and panels; implies "
+            "--save-segmentation (default: OUTPUT_DIR/segmentation_qc)."
+        ),
     )
     return parser
 
@@ -335,6 +366,8 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
             z_projection=values["z_projection"],
             device=values["device"],
             save_masks=values["save_masks"],
+            save_segmentation=values["save_segmentation"],
+            segmentation_output_dir=values["segmentation_output_dir"],
         )
     else:
         config = load_config(args.config)
@@ -379,6 +412,8 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         "z_projection",
         "device",
         "save_masks",
+        "save_segmentation",
+        "segmentation_output_dir",
     ):
         if hasattr(args, argument):
             setattr(config, argument, getattr(args, argument))
@@ -386,6 +421,10 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         config.exclude = tuple(args.exclude)
     if hasattr(args, "extensions"):
         config.extensions = tuple(args.extensions)
+    if config.segmentation_output_dir is not None and not (
+        hasattr(args, "save_segmentation") and args.save_segmentation is False
+    ):
+        config.save_segmentation = True
     return config
 
 
@@ -413,21 +452,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nDiscovered {len(table)} supported image(s).")
         return 0
 
-    if (args.show_segmentation or args.save_segmentation) and not config.save_masks:
+    if args.show_segmentation and not config.save_masks:
         config.save_masks = True
 
     result = run_analysis(config)
-    saved = save_or_show_segmentations(
-        config,
-        result.mask_paths,
-        show=args.show_segmentation,
-        save=args.save_segmentation,
-    )
+    if args.show_segmentation:
+        save_or_show_segmentations(
+            config,
+            result.mask_paths,
+            show=True,
+        )
+    saved = result.segmentation_paths
     print(f"Analyzed {len(result.images)} image/reference set(s).")
     print(f"Measured {len(result.cells)} segmented cell(s).")
     print(f"Results: {config.output_dir.resolve()}")
     if saved:
-        print(f"Saved {len(saved)} segmentation QC figure(s) to {saved[0].parent.resolve()}")
+        print(f"Saved {len(saved)} segmentation QC image(s) to {saved[0].parent.resolve()}")
     return 0
 
 

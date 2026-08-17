@@ -28,5 +28,7 @@
   "device": "auto",
   "recursive": false,
   "exclude": [],
-  "save_masks": true
+  "save_masks": true,
+  "save_segmentation": true,
+  "segmentation_output_dir": "path/to/segmentation-qc"
 }

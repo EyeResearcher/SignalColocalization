@@ -174,6 +174,11 @@ Important analysis options include:
 - `exclude`: filenames, relative paths, absolute paths, or glob patterns to skip.
 - `device`: `auto`, `cpu`, `mps`, `cuda`, or a device such as `cuda:1`.
 - `save_masks`: save label TIFFs under `OUTPUT_DIR/masks` (default `true`).
+- `save_segmentation`: save the QC grid and all four individual panels for
+  every processed image/reference/signal combination (default `false`).
+- `segmentation_output_dir`: optional destination for QC PNGs. Setting it also
+  enables `save_segmentation`; the default destination is
+  `OUTPUT_DIR/segmentation_qc`.
 - `extensions`: optional list overriding the supported extension list.
 
 The output directory is automatically excluded from image discovery, so an
@@ -216,12 +221,30 @@ Then run the notebook in order:
 
 1. Run the import cell.
 2. Edit the `AnalysisConfig` cell. Set `input_dir`, `output_dir`, reference
-   channel/model settings, and signal channel/threshold settings.
+   channel/model settings, and signal channel/threshold settings. Set
+   `save_segmentation=True` to export QC PNGs for every input image.
 3. Run `inspect_inputs(config)`. Check the discovered files, `shape_cyx`, and
    channel names before starting Cellpose.
 4. Run `result = run_analysis(config)`.
 5. Run the visualization cell. Set `img_number` to the row to inspect; the cell
    loads the corresponding saved mask and calls `show_segmentation(...)`.
+
+From a notebook, the matching save helper accepts the reference image, masks,
+signal image, and an explicit destination:
+
+```python
+visualization.save_segmentation_views(
+    reference_image,
+    masks,
+    signal_image,
+    signal_spec=config.signal_channels[0],
+    output_dir=Path("path/to/segmentation-qc"),
+    name="example_RPBMS_GD",
+    title="Example acquisition",
+)
+```
+
+It returns paths to the saved grid, reference, signal, masks, and overlay PNGs.
 
 The notebook uses a configurable transform list. `MaxProjection()`,
 `MeanProjection()`, or `SelectPlane(index)` can reduce Z, and transforms are
@@ -298,10 +321,21 @@ For a non-interactive or remote run, save the same visualizations as PNG files:
 python -m colocalize analysis_config.json --save-segmentation
 ```
 
-Both flags can be combined. Segmentation plots are saved under
-`OUTPUT_DIR/segmentation_qc`. When either visualization flag is used, masks are
-saved even if the JSON sets `save_masks` to `false`, because the QC plots require
-them.
+Each image/reference/signal combination produces five files: the complete
+four-panel grid plus separate `reference`, `signal`, `masks`, and `overlay`
+PNGs. To save them to a specific folder, provide the folder directly; this
+option implies `--save-segmentation`:
+
+```powershell
+python -m colocalize analysis_config.json `
+  --segmentation-output-dir "C:\path\to\segmentation-qc"
+```
+
+The display and save flags can be combined. Without an explicit folder,
+segmentation plots are saved under `OUTPUT_DIR/segmentation_qc`. When either
+the config or CLI enables saving, all images discovered from `input_dir` are
+exported. Interactive display still requires saved masks when it is requested
+after analysis.
 
 ## Run from Johnson Lab eLabFTW or other image pointers
 
@@ -350,6 +384,9 @@ python run_elab_colocalization.py analysis_config.json `
   --output-dir results/combined `
   --save-segmentation
 ```
+
+The eLabFTW runner also accepts `--segmentation-output-dir PATH`; it saves the
+four-panel grid and all four individual panel PNGs to that directory.
 
 Use `--inspect` to resolve and inspect image shapes/channels without running
 Cellpose. A single shorthand `--experiment-id 42` retains the filename
@@ -401,8 +438,8 @@ Each run writes:
 - `image_summary.csv`: cell counts and aggregate measurements for each input
   image/reference-set pair.
 - `masks/*.tif`: integer Cellpose label images when `save_masks` is enabled.
-- `segmentation_qc/*.png`: optional four-panel QC figures created with
-  `--save-segmentation`.
+- `segmentation_qc/*.png`: optional four-panel QC grids and their four separate
+  panel images, created with `--save-segmentation`.
 
 The QC figure shows the scaled reference image, scaled signal image, red mask
 boundaries, and a false-color overlay. In the overlay the reference is green,

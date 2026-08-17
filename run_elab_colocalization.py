@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 
-from colocalize.cli import load_config, save_or_show_segmentations
+from colocalize.cli import load_config
 from colocalize.elabftw import ElabClient, ElabError, write_workbook
 from colocalize.job import job_schema_path, load_job
 from colocalize.pipeline import inspect_inputs, run_analysis
@@ -54,6 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inspect", action="store_true", help="Inspect downloaded images without Cellpose.")
     parser.add_argument("--save-segmentation", action="store_true", help="Save segmentation QC PNGs.")
     parser.add_argument(
+        "--segmentation-output-dir",
+        type=Path,
+        help=(
+            "Directory for segmentation grids and individual panels; implies "
+            "--save-segmentation."
+        ),
+    )
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
         help="Verify VPN, credentials, and an extended experiment LIST request, then exit.",
@@ -95,17 +103,28 @@ def main(argv: list[str] | None = None) -> int:
 
             config = replace(config, input_dir=input_dir, output_dir=output_dir)
             inspect = args.inspect or bool(job and job.inspect)
-            save_segmentation = args.save_segmentation or bool(job and job.save_segmentation)
+            save_segmentation = (
+                args.save_segmentation
+                or args.segmentation_output_dir is not None
+                or bool(job and job.save_segmentation)
+                or config.save_segmentation
+                or config.segmentation_output_dir is not None
+            )
             if inspect:
                 print(inspect_inputs(config).to_string(index=False))
                 print(f"\nResolved and inspected {len(resolved.images)} supported image(s).")
                 return 0
 
-            if save_segmentation and not config.save_masks:
-                config.save_masks = True
+            config = replace(
+                config,
+                save_segmentation=save_segmentation,
+                segmentation_output_dir=(
+                    args.segmentation_output_dir
+                    if args.segmentation_output_dir is not None
+                    else config.segmentation_output_dir
+                ),
+            )
             result = run_analysis(config)
-            if save_segmentation:
-                save_or_show_segmentations(config, result.mask_paths, save=True)
             workbook_name = "colocalization_results.xlsx"
             if len(args.experiment_id) == 1 and len(pointers) == 1:
                 workbook_name = f"experiment_{args.experiment_id[0]}_colocalization.xlsx"

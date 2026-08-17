@@ -23,6 +23,7 @@ def test_load_config_builds_analysis_config_and_resolves_relative_directories(tm
             {
                 "input_dir": "images",
                 "output_dir": "results",
+                "segmentation_output_dir": "qc",
                 "reference_sets": [
                     {"name": "cells", "channel": "DAPI", "model": "nuclei"}
                 ],
@@ -38,6 +39,8 @@ def test_load_config_builds_analysis_config_and_resolves_relative_directories(tm
 
     assert config.input_dir == tmp_path / "images"
     assert config.output_dir == tmp_path / "results"
+    assert config.segmentation_output_dir == tmp_path / "qc"
+    assert config.save_segmentation is True
     assert config.reference_sets[0].channel == "DAPI"
     assert config.reference_sets[0].model == "nuclei"
     assert config.signal_channels[0].channel == 1
@@ -167,7 +170,9 @@ def test_cli_options_override_json_values(tmp_path):
     assert config.reference_sets[0].channel == "DAPI"
 
 
-def test_save_segmentation_writes_qc_png(tmp_path, monkeypatch):
+def test_save_segmentation_writes_grid_and_each_panel_to_requested_dir(
+    tmp_path, monkeypatch
+):
     image_path = tmp_path / "example.tif"
     acquisition = MicroscopyImage(
         path=image_path,
@@ -186,8 +191,21 @@ def test_save_segmentation_writes_qc_png(tmp_path, monkeypatch):
     tifffile.imwrite(mask_path, np.asarray([[0, 0, 0, 0], [0, 1, 1, 0]] * 2))
     monkeypatch.setattr("colocalize.cli.build_dataset", lambda config: [acquisition])
 
-    saved = save_or_show_segmentations(config, [mask_path], save=True)
+    requested_dir = tmp_path / "requested-qc-folder"
+    saved = save_or_show_segmentations(
+        config,
+        [mask_path],
+        save=True,
+        output_dir=requested_dir,
+    )
 
-    assert len(saved) == 1
-    assert saved[0].is_file()
-    assert saved[0].parent == config.output_dir / "segmentation_qc"
+    assert len(saved) == 5
+    assert all(path.is_file() for path in saved)
+    assert {path.parent for path in saved} == {requested_dir}
+    assert {path.name.rsplit("__", 1)[-1] for path in saved} == {
+        "grid.png",
+        "reference.png",
+        "signal.png",
+        "masks.png",
+        "overlay.png",
+    }
