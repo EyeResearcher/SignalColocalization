@@ -12,9 +12,21 @@ def generate_tiles(
     image: np.ndarray,
     tile_size: tuple[int, int],
 ) -> Iterator[tuple[np.ndarray, int, int]]:
-    """Yield (tile_cyx, y0, x0) for non-overlapping tiles covering the full CYX image.
+    """Yield non-overlapping tiles that together cover the full CYX image.
 
-    Edge tiles are zero-padded to tile_size when the image is not evenly divisible.
+    Tiles are produced in row-major (top-to-bottom, left-to-right) order.
+    When an image dimension is not evenly divisible by the tile size the
+    rightmost or bottom-most tiles are zero-padded to exactly ``tile_size``.
+
+    Args:
+        image: CYX array to tile.  The channel axis (C) is preserved in every
+            tile.
+        tile_size: ``(tile_height, tile_width)`` in pixels.
+
+    Yields:
+        Three-tuples of ``(tile_cyx, y0, x0)`` where ``tile_cyx`` is the
+        cropped and zero-padded tile array, ``y0`` is the top-left row index in
+        the original image, and ``x0`` is the top-left column index.
     """
     _, H, W = image.shape
     th, tw = tile_size
@@ -30,6 +42,7 @@ def generate_tiles(
                 padded[:, : tile.shape[1], : tile.shape[2]] = tile
                 tile = padded
             yield tile, y0, x0
+     
 
 
 def stitch_masks(
@@ -38,8 +51,19 @@ def stitch_masks(
 ) -> np.ndarray:
     """Combine per-tile mask arrays into a single full-image label array.
 
-    Labels are offset per tile so every cell retains a unique ID across the stitched image.
-    Padded zero regions beyond the original image boundary are clipped.
+    Cell IDs are made globally unique by offsetting each tile's labels by the
+    maximum label seen in all preceding tiles.  Zero-padded edge regions that
+    extend beyond the original image boundary are clipped away.
+
+    Args:
+        image_shape: ``(height, width)`` of the original (un-padded) image.
+        tile_results: List of ``(y0, x0, masks)`` tuples, one per tile, in any
+            order.  ``y0`` and ``x0`` are the tile origins and ``masks`` is the
+            integer label array produced by segmentation for that tile.
+
+    Returns:
+        Integer label array of shape ``image_shape``.  Every cell has a unique
+        ID across the entire stitched image.
     """
     stitched = np.zeros(image_shape, dtype=np.int32)
     label_offset = 0

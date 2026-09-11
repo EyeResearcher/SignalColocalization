@@ -126,3 +126,56 @@ class CellposeSegmenter:  # pylint: disable=too-few-public-methods
         )
         masks, flows = result[0], result[1]
         return np.asarray(masks, dtype=np.int32), flows
+
+    def segment_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        diameter: float | None = None,
+        flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
+        min_size: int = 15,
+        normalize: bool = True,
+        batch_size: int = 8,
+    ) -> list[np.ndarray]:
+        """Segment a list of images in batched forward passes.
+
+        All images are sent to the model in chunks of ``batch_size`` so the GPU
+        processes them together without exhausting VRAM.  Images should be the
+        same shape for optimal batching; zero-padded tiles from
+        :func:`generate_tiles` satisfy this automatically.
+
+        Args:
+            images: List of 2-D intensity arrays to segment.
+            diameter: Expected cell diameter in pixels.  ``None`` triggers
+                automatic estimation per image.
+            flow_threshold: Flow error threshold for cell mask acceptance.
+            cellprob_threshold: Cell probability threshold.
+            min_size: Minimum cell area in pixels.
+            normalize: Whether Cellpose normalises each image before inference.
+            batch_size: Maximum number of images per Cellpose ``eval`` call.
+                Reduce if GPU runs out of memory; increase on high-VRAM cards.
+
+        Returns:
+            List of integer label arrays in the same order as ``images``.
+        """
+        if not images:
+            return []
+        all_masks: list[np.ndarray] = []
+        for start in range(0, len(images), batch_size):
+            chunk = [np.asarray(img) for img in images[start : start + batch_size]]
+            result = self.model.eval(
+                chunk,
+                diameter=diameter,
+                flow_threshold=flow_threshold,
+                cellprob_threshold=cellprob_threshold,
+                min_size=min_size,
+                normalize=normalize,
+                progress=True,
+            )
+            masks_out = result[0]
+            # model.eval with a list returns a list; guard against single-array edge case
+            if not isinstance(masks_out, list):
+                masks_out = [masks_out]
+            all_masks.extend(np.asarray(m, dtype=np.int32) for m in masks_out)
+        return all_masks

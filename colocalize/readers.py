@@ -86,6 +86,24 @@ class ImageReader:
 
         image = BioImage(path)
         image.set_scene(self.scene_index)
+        if "S" in image.dims.order:
+            # RGB samples are separate from BioIO's microscopy channel axis.
+            # Keep every sample instead of implicitly selecting S=0.
+            samples = np.asarray(image.get_image_data("CSZYX", T=self.time_index))
+            channel_count, sample_count = samples.shape[:2]
+            base_names = self._channel_names(image.channel_names, channel_count)
+            sample_names = (
+                ("red", "green", "blue", "alpha")[:sample_count]
+                if sample_count in (3, 4)
+                else tuple(f"sample_{i}" for i in range(sample_count))
+            )
+            names = tuple(
+                sample if channel_count == 1 else f"{base}:{sample}"
+                for base in base_names
+                for sample in sample_names
+            )
+            data = samples.reshape(channel_count * sample_count, *samples.shape[2:])
+            return MicroscopyImage(path=path, data=data, channel_names=names)
         data = np.asarray(image.get_image_data("CZYX", T=self.time_index))
         names = self._channel_names(image.channel_names, data.shape[0])
         return MicroscopyImage(path=path, data=data, channel_names=names)

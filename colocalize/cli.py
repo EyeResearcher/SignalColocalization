@@ -157,6 +157,7 @@ def save_or_show_segmentations(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the colocalize entry point."""
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -491,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _safe_name(value: str) -> str:
+    """Replace characters that are not alphanumeric, hyphens, or underscores with underscores."""
     return "".join(
         character if character.isalnum() or character in "-_" else "_"
         for character in value

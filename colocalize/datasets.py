@@ -26,6 +26,16 @@ class ImageDataset:
         reader: ImageReader | None = None,
         transforms: Sequence[ArrayTransform] | ArrayTransform | None = None,
     ) -> None:
+        """Initialise the dataset with an ordered sequence of image paths.
+
+        Args:
+            paths: Ordered collection of file paths to load.
+            reader: Reader used to decode each file.  Defaults to
+                :class:`~colocalize.readers.ImageReader` with its own defaults.
+            transforms: One or more callables that map the raw CZYX array to a
+                CYX array suitable for analysis.  Defaults to the reader's
+                configured Z-projection transform.
+        """
         self.paths = tuple(Path(path) for path in paths)
         self.reader = reader or ImageReader()
         if transforms is None:
@@ -35,9 +45,23 @@ class ImageDataset:
         self.transforms = Compose(transforms)
 
     def __len__(self) -> int:
+        """Return the number of images in the dataset."""
         return len(self.paths)
 
     def __getitem__(self, index: int) -> MicroscopyImage:
+        """Load, transform, and return the image at the given index.
+
+        Args:
+            index: Zero-based position in :attr:`paths`.
+
+        Returns:
+            :class:`~colocalize.readers.MicroscopyImage` with the raw data
+            replaced by the transformed CYX array.
+
+        Raises:
+            ValueError: If the transform chain produces an array that is not
+                three-dimensional or changes the channel count.
+        """
         acquisition = self.reader.read_stack(self.paths[index])
         data = np.asarray(self.transforms(acquisition.data))
         if data.ndim != 3:
@@ -57,6 +81,7 @@ class ImageDataset:
         )
 
     def __iter__(self):
+        """Iterate over all images in path order, loading and transforming each one."""
         for index in range(len(self)):
             yield self[index]
 
@@ -152,6 +177,15 @@ class AnalysisResult:
     segmentation_paths: list[Path] = field(default_factory=list)
 
     def save_tables(self, output_dir: str | Path) -> tuple[Path, Path]:
+        """Write cells.csv and image_summary.csv to output_dir.
+
+        Args:
+            output_dir: Directory in which to write the two CSV files.
+                Created automatically if it does not exist.
+
+        Returns:
+            Tuple of ``(cells_path, images_path)`` for the two written files.
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         cells_path = output_dir / "cells.csv"

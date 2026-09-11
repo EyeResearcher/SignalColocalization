@@ -124,7 +124,7 @@ def _segmentation_panels(
             "masks",
             mask_overlay,
             None,
-            f"Masks (red boundaries, n={int(np.max(masks))})",
+            f"Masks (red boundaries, n={int(np.count_nonzero(np.unique(masks)))})",
         ),
         (
             "overlay",
@@ -145,20 +145,21 @@ def _positive_mask_labels(
     if signal is None or signal_spec is None:
         return np.array([], dtype=np.asarray(masks).dtype)
 
+    from scipy import ndimage as ndi  # pylint: disable=import-outside-toplevel
+
     values = np.asarray(signal, dtype=float)
     labels = np.asarray(masks)
     threshold = signal_threshold(values, signal_spec)
-    positive = values > threshold
-    return np.asarray(
-        [
-            label
-            for label in np.unique(labels)
-            if label != 0
-            and np.mean(positive[labels == label])
-            >= signal_spec.positive_fraction_cutoff
-        ],
-        dtype=labels.dtype,
-    )
+    positive = (values > threshold).astype(np.float32)
+    unique_labels = np.unique(labels)
+    unique_labels = unique_labels[unique_labels != 0]
+    if unique_labels.size == 0:
+        return np.array([], dtype=labels.dtype)
+    # one vectorized pass over the image instead of one boolean mask per label
+    mean_positive = ndi.mean(positive, labels, index=unique_labels)
+    return unique_labels[
+        np.asarray(mean_positive) >= signal_spec.positive_fraction_cutoff
+    ]
 
 
 def _scale(image: np.ndarray) -> np.ndarray:

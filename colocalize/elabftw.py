@@ -50,6 +50,20 @@ class ElabClient:
         base_url: str | None = None,
         timeout: float = 120.0,
     ) -> None:
+        """Configure the eLabFTW HTTP client.
+
+        Args:
+            api_key: Personal access token for the eLabFTW REST API.  Reads
+                ``ELAB_APIKEY`` from the environment when not supplied directly.
+            base_url: Root URL of the eLabFTW instance (e.g.
+                ``https://elabftw.example.org``).  Reads ``ELAB_BASE`` from the
+                environment when not supplied directly.
+            timeout: Socket timeout in seconds for every HTTP request.
+
+        Raises:
+            ElabError: If no API key is available after checking both the
+                argument and the ``ELAB_APIKEY`` environment variable.
+        """
         self.api_key = api_key or os.environ.get("ELAB_APIKEY", "")
         self.base_url = (base_url or os.environ.get("ELAB_BASE") or DEFAULT_ELAB_BASE).rstrip("/")
         self.timeout = timeout
@@ -70,9 +84,23 @@ class ElabClient:
         return payload
 
     def get_experiment(self, experiment_id: int) -> dict[str, Any]:
+        """Fetch a single experiment record by numeric ID."""
         return self.get_record("experiments", experiment_id)
 
     def get_record(self, entity_type: str, record_id: int) -> dict[str, Any]:
+        """Fetch a single record of any entity type by numeric ID.
+
+        Args:
+            entity_type: eLabFTW entity type string, e.g. ``'experiments'`` or
+                ``'items'``.
+            record_id: Numeric identifier of the record.
+
+        Returns:
+            The API payload as a parsed dict.
+
+        Raises:
+            ElabError: If the API returns a non-dict response.
+        """
         entity_type = _entity_type(entity_type)
         payload = self._json(f"{entity_type}/{record_id}")
         if not isinstance(payload, dict):
@@ -82,6 +110,20 @@ class ElabClient:
     def list_uploads(
         self, record_id: int | None = None, *, entity_type: str = "experiments"
     ) -> list[dict[str, Any]]:
+        """List file uploads attached to a record, or all uploads if no record is given.
+
+        Args:
+            record_id: Numeric identifier of the experiment or resource.
+                When ``None``, lists all uploads accessible to the authenticated
+                user.
+            entity_type: eLabFTW entity type owning the uploads.
+
+        Returns:
+            List of upload metadata dicts as returned by the API.
+
+        Raises:
+            ElabError: If the API returns a non-list response.
+        """
         endpoint = "uploads"
         if record_id is not None:
             endpoint = f"{_entity_type(entity_type)}/{record_id}/uploads"

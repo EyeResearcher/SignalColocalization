@@ -50,6 +50,7 @@ def test_non_oir_images_are_read_with_bioio(monkeypatch, filename):
 
     class FakeBioImage:
         channel_names = ("DAPI", "Signal")
+        dims = types.SimpleNamespace(order="TCZYX")
 
         def __init__(self, path):
             assert path == Path(filename)
@@ -74,6 +75,29 @@ def test_non_oir_images_are_read_with_bioio(monkeypatch, filename):
 
     np.testing.assert_array_equal(image.data, source)
     assert image.channel_names == ("DAPI", "Signal")
+
+
+@pytest.mark.parametrize("planar", [False, True])
+def test_rgb_tiff_preserves_each_color_sample(tmp_path, planar):
+    pytest.importorskip("bioio")
+    import tifffile
+
+    rgb = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+    path = tmp_path / "rgb.tif"
+    tifffile.imwrite(
+        path,
+        rgb.transpose(2, 0, 1) if planar else rgb,
+        photometric="rgb",
+        planarconfig="separate" if planar else "contig",
+    )
+
+    stack = ImageReader().read_stack(path)
+    assert stack.data.shape == (3, 1, 4, 5)
+    assert stack.channel_names == ("red", "green", "blue")
+    np.testing.assert_array_equal(stack.data[:, 0], rgb.transpose(2, 0, 1))
+    projected = ImageReader().read(path)
+    np.testing.assert_array_equal(projected.channel(2), rgb[:, :, 2])
+    np.testing.assert_array_equal(projected.channel("red"), rgb[:, :, 0])
 
 
 def test_oir_rgb_samples_become_channels():
