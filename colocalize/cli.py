@@ -491,7 +491,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _safe_name(value: str) -> str:
-    return "".join(character if character.isalnum() or character in "-_" else "_" for character in value)
+    return "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in value
+    )
 
 
 if __name__ == "__main__":

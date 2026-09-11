@@ -56,7 +56,9 @@ def resolve_sources(
                     [upload_id], destination, used_names=used_names, extensions=extensions
                 )
                 images.extend(found)
-                remote_upload_ids.update(source.upload_id for source in found if source.upload_id is not None)
+                remote_upload_ids.update(
+                    source.upload_id for source in found if source.upload_id is not None
+                )
                 continue
 
             record_id = int(value)
@@ -75,7 +77,9 @@ def resolve_sources(
                 extensions=extensions,
             )
             images.extend(found)
-            remote_upload_ids.update(source.upload_id for source in found if source.upload_id is not None)
+            remote_upload_ids.update(
+                source.upload_id for source in found if source.upload_id is not None
+            )
             continue
 
         for path in _local_paths(kind, value, extensions):
@@ -109,7 +113,11 @@ def parse_pointer(pointer: str) -> tuple[str, str]:
     if pointer.startswith(("http://", "https://")):
         return _parse_elab_url(pointer)
 
-    match = re.match(r"^(experiment|experiments|item|items|resource|resources|upload):(.+)$", pointer, re.I)
+    match = re.match(
+        r"^(experiment|experiments|item|items|resource|resources|upload):(.+)$",
+        pointer,
+        re.I,
+    )
     if match:
         aliases = {
             "experiment": "experiments",
@@ -153,7 +161,9 @@ def _parse_elab_url(pointer: str) -> tuple[str, str]:
         return "experiments", query_id
     if query_id.isdigit() and page in {"database.php", "items.php"}:
         return "items", query_id
-    raise ElabError(f"URL does not identify an eLabFTW experiment, resource, or upload: {pointer!r}.")
+    raise ElabError(
+        f"URL does not identify an eLabFTW experiment, resource, or upload: {pointer!r}."
+    )
 
 
 def _local_paths(kind: str, value: str, extensions: Iterable[str]) -> list[Path]:

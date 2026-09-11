@@ -53,7 +53,7 @@ def signal_threshold(image: np.ndarray, spec: SignalChannel) -> float:
     )
 
 
-def measure_masks(
+def measure_masks(  # pylint: disable=too-many-locals
     *,
     source: str,
     reference_set: str,
@@ -190,7 +190,9 @@ def summarize_cells(cells: pd.DataFrame) -> pd.DataFrame:
         column for column in cells.columns if column.endswith("_positive_cell")
     ]
     intensity_columns = [
-        column for column in cells.columns if column.endswith("_mean") and column.startswith("signal_")
+        column
+        for column in cells.columns
+        if column.endswith("_mean") and column.startswith("signal_")
     ]
     for column in positive_columns:
         counts = cells.groupby(group_columns, sort=False)[column].sum().rename(f"{column}_count")

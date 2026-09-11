@@ -145,8 +145,9 @@ class ImageReader:
             axes_list.pop(position)
 
         if "Y" not in axes_list or "X" not in axes_list:
-            print(f"Warning: {path.name} does not contain Y and X axes; got {''.join(axes_list)!r}.")
-            raise ValueError(f"Image axes must contain Y and X; got {''.join(axes_list)!r}.")
+            axes_str = "".join(axes_list)
+            print(f"Warning: {path.name} does not contain Y and X axes; got {axes_str!r}.")
+            raise ValueError(f"Image axes must contain Y and X; got {axes_str!r}.")
         if "C" not in axes_list:
             array = np.expand_dims(array, 0)
             axes_list.insert(0, "C")

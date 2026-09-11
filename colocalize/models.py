@@ -42,7 +42,7 @@ def resolve_model_source(model: str | Path) -> str:
 
 def _download_model(repo_id: str, filename: str) -> str:
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download  # pylint: disable=import-outside-toplevel
     except ImportError as exc:
         raise ImportError(
             "Downloading Cellpose models from Hugging Face requires "
@@ -65,7 +65,7 @@ def _cellpose_model_dir() -> Path:
     return Path.home() / ".cellpose" / "models"
 
 
-class CellposeSegmenter:
+class CellposeSegmenter:  # pylint: disable=too-few-public-methods
     """Small compatibility wrapper around the Cellpose Python API."""
 
     def __init__(self, model: str | Path = "cpsam_v2", device: str = "auto") -> None:
@@ -74,7 +74,7 @@ class CellposeSegmenter:
         self.model = self._load_model()
 
     def _load_model(self):
-        from cellpose import models
+        from cellpose import models  # pylint: disable=import-outside-toplevel
 
         gpu, resolved_device = self._resolve_device()
         kwargs = {"gpu": gpu, "pretrained_model": self.model_name}
@@ -92,7 +92,7 @@ class CellposeSegmenter:
             return models.CellposeModel(**legacy_kwargs)
 
     def _resolve_device(self):
-        import torch
+        import torch  # pylint: disable=import-outside-toplevel
 
         requested = self.device.casefold()
         if requested == "auto":
