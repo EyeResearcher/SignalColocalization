@@ -120,7 +120,25 @@
           "pattern": "^(auto|cpu|mps|cuda(:[0-9]+)?)$",
           "default": "auto"
         },
-        "save_masks": {"type": "boolean", "default": true}
+        "save_masks": {"type": "boolean", "default": true},
+        "tile_size": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "items": {"type": "integer", "exclusiveMinimum": 0},
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ],
+          "default": null,
+          "description": "[height, width] in pixels. When set, the image is cropped into non-overlapping tiles before segmentation."
+        },
+        "stitch_masks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Combine per-tile masks into a single full-image mask file. No effect when tile_size is null."
+        }
       }
     }
   }

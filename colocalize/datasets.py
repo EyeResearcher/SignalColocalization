@@ -105,6 +105,8 @@ class AnalysisConfig:
     save_segmentation: bool = False
     segmentation_output_dir: str | Path | None = None
     transforms: Sequence[ArrayTransform] | None = None
+    tile_size: tuple[int, int] | None = None
+    stitch_masks: bool = False
 
     def __post_init__(self) -> None:
         self.input_dir = Path(self.input_dir)
@@ -116,6 +118,11 @@ class AnalysisConfig:
             self.exclude = (self.exclude,)
         else:
             self.exclude = tuple(self.exclude)
+        if self.tile_size is not None:
+            h, w = self.tile_size
+            if h <= 0 or w <= 0:
+                raise ValueError("tile_size dimensions must be positive integers.")
+            self.tile_size = (int(h), int(w))
         if not self.reference_sets:
             raise ValueError("At least one ReferenceSet is required.")
         if not self.signal_channels:

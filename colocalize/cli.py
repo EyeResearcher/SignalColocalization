@@ -77,6 +77,8 @@ def config_from_mapping(values: dict, *, base_dir: str | Path = ".") -> Analysis
 
     if "extensions" in values:
         values["extensions"] = tuple(values["extensions"])
+    if "tile_size" in values and values["tile_size"] is not None:
+        values["tile_size"] = tuple(values["tile_size"])
     return AnalysisConfig(
         reference_sets=references,
         signal_channels=signals,
@@ -329,6 +331,20 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="Save label TIFF masks (default: true).",
     )
+    analysis.add_argument(
+        "--tile-size",
+        nargs=2,
+        type=int,
+        metavar=("HEIGHT", "WIDTH"),
+        default=argparse.SUPPRESS,
+        help="Crop images into non-overlapping tiles before segmentation. Default: disabled.",
+    )
+    analysis.add_argument(
+        "--stitch-masks",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="Stitch per-tile masks into a single full-image mask file (default: false).",
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
@@ -414,6 +430,7 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         "save_masks",
         "save_segmentation",
         "segmentation_output_dir",
+        "stitch_masks",
     ):
         if hasattr(args, argument):
             setattr(config, argument, getattr(args, argument))
@@ -421,6 +438,8 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         config.exclude = tuple(args.exclude)
     if hasattr(args, "extensions"):
         config.extensions = tuple(args.extensions)
+    if hasattr(args, "tile_size") and args.tile_size is not None:
+        config.tile_size = tuple(args.tile_size)
     if config.segmentation_output_dir is not None and not (
         hasattr(args, "save_segmentation") and args.save_segmentation is False
     ):

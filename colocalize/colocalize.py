@@ -61,6 +61,8 @@ def measure_masks(
     masks: np.ndarray,
     signals: dict[str, np.ndarray],
     signal_specs: dict[str, SignalChannel],
+    tile_y: int = 0,
+    tile_x: int = 0,
 ) -> pd.DataFrame:
     """Return one row of morphology and signal descriptors per labeled mask."""
     reference = np.asarray(reference_image, dtype=float)
@@ -74,6 +76,8 @@ def measure_masks(
     columns = [
         "source",
         "reference_set",
+        "tile_y",
+        "tile_x",
         "cell_id",
         "centroid_y",
         "centroid_x",
@@ -113,9 +117,11 @@ def measure_masks(
         row: dict[str, float | int | str | bool] = {
             "source": source,
             "reference_set": reference_set,
+            "tile_y": tile_y,
+            "tile_x": tile_x,
             "cell_id": int(region.label),
-            "centroid_y": float(region.centroid[0]),
-            "centroid_x": float(region.centroid[1]),
+            "centroid_y": float(region.centroid[0]) + tile_y,
+            "centroid_x": float(region.centroid[1]) + tile_x,
             "area_px": int(region.area),
             "perimeter_px": float(region.perimeter),
             "equivalent_diameter_px": float(region.equivalent_diameter_area),

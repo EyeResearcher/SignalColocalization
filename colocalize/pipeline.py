@@ -12,7 +12,8 @@ import tifffile
 from .colocalize import measure_masks, summarize_cells
 from .datasets import AnalysisConfig, AnalysisResult, ImageDataset
 from .models import CellposeSegmenter
-from .readers import ImageReader, discover_images
+from .readers import ImageReader, MicroscopyImage, discover_images
+from .tiling import generate_tiles, stitch_masks
 from .visualization import save_segmentation_views
 
 
@@ -51,11 +52,12 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
 
     for acquisition in build_dataset(config, paths):
         path = acquisition.path
-        signals = {
-            spec.name: acquisition.channel(spec.channel)
-            for spec in config.signal_channels
-        }
         signal_specs = {spec.name: spec for spec in config.signal_channels}
+
+        if config.tile_size is not None:
+            tile_iter = list(generate_tiles(acquisition.data, config.tile_size))
+        else:
+            tile_iter = [(acquisition.data, 0, 0)]
 
         for reference in config.reference_sets:
             analyzed_groups.append(
@@ -65,56 +67,96 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                 segmenters[reference.name] = CellposeSegmenter(
                     reference.model, device=config.device
                 )
-            reference_image = acquisition.channel(reference.channel)
-            masks, _ = segmenters[reference.name].segment(
-                reference_image,
-                diameter=reference.diameter,
-                flow_threshold=reference.flow_threshold,
-                cellprob_threshold=reference.cellprob_threshold,
-                min_size=reference.min_size,
-                normalize=reference.normalize,
-            )
-            table = measure_masks(
-                source=path.name,
-                reference_set=reference.name,
-                reference_image=reference_image,
-                masks=masks,
-                signals=signals,
-                signal_specs=signal_specs,
-            )
-            tables.append(table)
 
-            if config.save_masks:
-                destination = mask_dir / f"{_safe_stem(path)}__{reference.name}_masks.tif"
-                tifffile.imwrite(destination, masks, compression="zlib")
-                mask_paths.append(destination)
+            tile_masks_buffer: list[tuple[int, int, np.ndarray]] = []
 
-            if config.save_segmentation:
-                qc_dir = (
-                    config.segmentation_output_dir
-                    if config.segmentation_output_dir is not None
-                    else config.output_dir / "segmentation_qc"
+            for tile_data, tile_y, tile_x in tile_iter:
+                tile_acq = MicroscopyImage(
+                    path=path, data=tile_data, channel_names=acquisition.channel_names
                 )
-                for signal_spec in config.signal_channels:
-                    name = (
-                        f"{_safe_name(_safe_stem(path))}__"
-                        f"{_safe_name(reference.name)}__"
-                        f"{_safe_name(signal_spec.name)}_segmentation"
-                    )
-                    segmentation_paths.extend(
-                        save_segmentation_views(
-                            reference_image,
-                            masks,
-                            signals[signal_spec.name],
-                            output_dir=qc_dir,
-                            name=name,
-                            signal_spec=signal_spec,
-                            title=(
-                                f"{path.name} | reference={reference.name} | "
-                                f"signal={signal_spec.name}"
-                            ),
+                signals = {
+                    spec.name: tile_acq.channel(spec.channel)
+                    for spec in config.signal_channels
+                }
+                reference_image = tile_acq.channel(reference.channel)
+                masks, _ = segmenters[reference.name].segment(
+                    reference_image,
+                    diameter=reference.diameter,
+                    flow_threshold=reference.flow_threshold,
+                    cellprob_threshold=reference.cellprob_threshold,
+                    min_size=reference.min_size,
+                    normalize=reference.normalize,
+                )
+                table = measure_masks(
+                    source=path.name,
+                    reference_set=reference.name,
+                    reference_image=reference_image,
+                    masks=masks,
+                    signals=signals,
+                    signal_specs=signal_specs,
+                    tile_y=tile_y,
+                    tile_x=tile_x,
+                )
+                tables.append(table)
+
+                if config.save_masks:
+                    if config.stitch_masks:
+                        tile_masks_buffer.append((tile_y, tile_x, masks))
+                    elif config.tile_size is not None:
+                        destination = (
+                            mask_dir
+                            / f"{_safe_stem(path)}__{reference.name}"
+                            f"__tile_y{tile_y}_x{tile_x}_masks.tif"
                         )
+                        tifffile.imwrite(destination, masks, compression="zlib")
+                        mask_paths.append(destination)
+                    else:
+                        destination = mask_dir / f"{_safe_stem(path)}__{reference.name}_masks.tif"
+                        tifffile.imwrite(destination, masks, compression="zlib")
+                        mask_paths.append(destination)
+
+                if config.save_segmentation:
+                    qc_dir = (
+                        config.segmentation_output_dir
+                        if config.segmentation_output_dir is not None
+                        else config.output_dir / "segmentation_qc"
                     )
+                    tile_suffix = (
+                        f"__tile_y{tile_y}_x{tile_x}" if config.tile_size is not None else ""
+                    )
+                    for signal_spec in config.signal_channels:
+                        name = (
+                            f"{_safe_name(_safe_stem(path))}__"
+                            f"{_safe_name(reference.name)}__"
+                            f"{_safe_name(signal_spec.name)}_segmentation"
+                            f"{tile_suffix}"
+                        )
+                        segmentation_paths.extend(
+                            save_segmentation_views(
+                                reference_image,
+                                masks,
+                                signals[signal_spec.name],
+                                output_dir=qc_dir,
+                                name=name,
+                                signal_spec=signal_spec,
+                                title=(
+                                    f"{path.name} | reference={reference.name} | "
+                                    f"signal={signal_spec.name}"
+                                    + (
+                                        f" | tile y={tile_y} x={tile_x}"
+                                        if config.tile_size is not None
+                                        else ""
+                                    )
+                                ),
+                            )
+                        )
+
+            if config.stitch_masks and config.save_masks and tile_masks_buffer:
+                H, W = acquisition.data.shape[1:]
+                stitched = stitch_masks((H, W), tile_masks_buffer)
+                destination = mask_dir / f"{_safe_stem(path)}__{reference.name}_masks.tif"
+                tifffile.imwrite(destination, stitched.astype(np.uint32), compression="zlib")
+                mask_paths.append(destination)
 
     cells = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
     groups = pd.DataFrame(analyzed_groups)
