@@ -1,297 +1,378 @@
-"""Per-mask morphology, intensity, and colocalization measurements."""
+"""Per-mask morphology, intensity, colocalization, and signal-distribution measurements."""
 
 from __future__ import annotations
 
 import warnings
 
+import tqdm
+
 import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
 from skimage.filters import threshold_otsu
-from skimage.measure import regionprops
+from skimage.measure import grid_points_in_poly, regionprops, regionprops_table
+
+try:  # Cellpose installs OpenCV; keep a fallback for minimal installations.
+    import cv2
+except ImportError:  # pragma: no cover - exercised only without Cellpose/OpenCV
+    cv2 = None
 
 from .datasets import SignalChannel
+from .background import  _robust_sigma
 
 
 def expand_masks(masks: np.ndarray, expansion_radius: int = 1) -> np.ndarray:
-    """Expand labeled regions outward without merging neighboring objects.
-
-    Each background pixel within ``expansion_radius`` of a label is assigned to
-    the nearest labeled region.  Adjacent objects never merge because
-    equidistant background pixels preserve the existing boundary.
-
-    Args:
-        masks: Integer label array where 0 is background and positive integers
-            are distinct objects.
-        expansion_radius: Maximum distance in pixels to grow each label.
-            A value of 0 or less returns a copy of the input unchanged.
-
-    Returns:
-        Label array of the same dtype and shape as ``masks`` with expanded
-        object boundaries.
-    """
+    """Expand labels by at most ``expansion_radius`` without merging objects."""
     labels = np.asarray(masks)
     if expansion_radius <= 0 or not np.any(labels):
         return labels.copy()
     background = labels == 0
     distances, indices = ndi.distance_transform_edt(background, return_indices=True)
     expanded = labels.copy()
-    fill = background & (distances <= expansion_radius)
-    nearest = labels[tuple(axis[fill] for axis in indices)]
-    expanded[fill] = nearest
+    grow = background & (distances <= expansion_radius)
+    expanded[grow] = labels[tuple(indices[:, grow])]
     return expanded
 
 
+
+
 def signal_threshold(image: np.ndarray, spec: SignalChannel) -> float:
-    """Calculate the image-level positivity threshold for a signal channel.
+    """Return the raw threshold used by legacy positivity/colocalization metrics.
 
-    The threshold is derived from the full image (not per-cell) and is used to
-    classify pixels as signal-positive or signal-negative inside each mask.
-
-    Args:
-        image: 2-D intensity array for the signal channel.
-        spec: Channel configuration specifying the thresholding method
-            (``'otsu'``, ``'percentile'``, ``'absolute'``, or ``'none'``) and
-            any associated numeric value.
-
-    Returns:
-        Scalar threshold float.  Pixels strictly above this value are positive.
-        Returns ``np.nan`` if the image contains no finite values.
-
-    Raises:
-        ValueError: If ``spec.threshold_method`` is ``'absolute'`` and
-            ``spec.threshold_value`` is ``None``, or if the method name is
-            unrecognised.
+    This threshold does not affect background subtraction or distributional
+    metrics. ``none`` returns negative infinity, making all finite pixels
+    positive for the legacy binary outputs.
     """
-    values = np.asarray(image, dtype=float)
-    finite = values[np.isfinite(values)]
+    finite = np.asarray(image, dtype=float)
+    finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         return np.nan
-    method = spec.threshold_method.casefold()
-    if method == "otsu":
-        if np.all(finite == finite[0]):
-            return float(finite[0])
-        return float(threshold_otsu(finite))
-    if method == "percentile":
-        percentile = 99.0 if spec.threshold_value is None else spec.threshold_value
-        return float(np.percentile(finite, percentile))
-    if method == "absolute":
+    if spec.threshold_method == "otsu":
+        return _otsu_or_constant(finite)
+    if spec.threshold_method == "percentile":
+        return float(np.percentile(finite, 99.0 if spec.threshold_value is None else spec.threshold_value))
+    if spec.threshold_method == "absolute":
         if spec.threshold_value is None:
             raise ValueError(f"Signal {spec.name!r} needs an absolute threshold_value.")
         return float(spec.threshold_value)
-    if method == "none":
+    if spec.threshold_method == "percent_of_max":
+        if spec.threshold_value is None:
+            raise ValueError(f"Signal {spec.name!r} needs a percent_of_max threshold_value.")
+        return float(spec.threshold_value * np.max(finite))
+    if spec.threshold_method == "none":
         return -np.inf
-    raise ValueError(
-        f"Unknown threshold method {spec.threshold_method!r}; "
-        "choose 'otsu', 'percentile', 'absolute', or 'none'."
-    )
-
+    raise ValueError(f"Unknown threshold method {spec.threshold_method!r}.")
 
 def measure_masks(
     *,
     reference_image: np.ndarray,
     masks: np.ndarray,
     signal_data: dict[str, tuple[np.ndarray, SignalChannel]],
-    tile_yx: tuple[int, int] = (0, 0),
-) -> pd.DataFrame:
-    """Return one row of morphology and signal descriptors per labeled mask.
+    backgrounds: dict[str, dict],
+    morphology_properties: tuple[str, ...] | list[str] | None = None) -> pd.DataFrame:
+    """Measure morphology, raw signal, and corrected signal distributions per cell.
+
+    Backgrounds are computed by the caller once per signal/reference-mask set.
+    Measurements are made within every nonzero label in ``masks``.
+    Raw intensity and colocalization outputs are retained
+    for backwards compatibility. Corrected outputs are based on
+    ``raw_signal - background`` and intentionally preserve negative values.
+
+    
+    Output columns include:
+
+    * Cell morphology: ``cell_id``, centroid, area, perimeter, diameter,
+      eccentricity, and solidity.
+    * ``reference_*``: raw reference-channel mean, median, and integral.
+    * ``signal_<name>_mean``, ``median``, ``max``, ``integrated``, positivity,
+      Pearson, Jaccard, and Manders metrics: raw signal values.
+    * ``signal_<name>_bg_level`` and ``bg_sigma``: background sampled at the
+      cell and image-level robust noise scale.
+    * ``corrected_mean``, ``corrected_median``, and ``corrected_integrated``:
+      untransformed background-subtracted raw units.
+    * ``q05`` through configured quantiles, ``iqr``, and ``tail_mean``:
+      background-subtracted values after optional noise normalization and
+      optional asinh transformation.
+    * ``frac_above_z*``: fraction of cell pixels with corrected value above
+      the stated multiple of ``bg_sigma``; independent of asinh scaling.
 
     Args:
-        reference_image: 2-D array for the reference (segmentation) channel.
-        masks: Integer label array aligned to ``reference_image``; each
-            positive integer identifies one segmented object.
-        signal_data: Mapping of signal name to ``(image array, SignalChannel
-            spec)`` for every channel to be measured inside the masks.
-        tile_yx: ``(y0, x0)`` pixel offset of this tile within the full image.
-            Centroids are reported in full-image coordinates.  Defaults to
-            ``(0, 0)`` for non-tiled runs.
-
-    Returns:
-        DataFrame with one row per labeled mask.  Columns include tile
-        coordinates, cell morphology, reference-channel intensity stats, and
-        per-signal colocalization metrics (threshold, Pearson r, Manders
-        coefficients, Jaccard index, etc.).  The ``source`` and
-        ``reference_set`` identity columns are not included; the caller should
-        prepend them with ``DataFrame.insert``.
+        reference_image: Raw reference-channel Y×X image.
+        masks: Aligned integer label image; zero denotes non-cell pixels.
+        signal_data: Mapping of output signal name to ``(image, spec)``.
+        backgrounds: Mapping of signal names to scalar ``background`` and
+            ``sigma`` results from ``background.compute_background``. Signals
+            must remain raw; subtraction is performed here exactly once.
+        morphology_properties: List of cell morphology properties to measure.
     """
-    reference = np.asarray(reference_image, dtype=float)
-    labels = np.asarray(masks)
-    reference_threshold = _otsu_or_constant(reference)
-    thresholds = {name: signal_threshold(img, spec) for name, (img, spec) in signal_data.items()}
-    signal_suffixes = [
+
+    if reference_image.shape != masks.shape:
+        raise ValueError("reference_image and masks must have matching shapes.")
+
+    if masks.ndim not in (2, 3):
+        raise ValueError("Masks must be a 2D or 3D label array.")
+    
+    if morphology_properties is None:
+        morphology_properties = ["area", "equivalent_diameter_area"]
+
+    properties = tuple(dict.fromkeys(
+    ["label", "centroid", *morphology_properties]
+    ))
+
+    morphology = regionprops_table(masks, properties=properties)
+
+# Preserve existing column names where appropriate.
+    axes = "yx" if masks.ndim == 2 else "zyx"
+
+    column_names = {
+    "label": "cell_id",
+    "area": "area_px" if masks.ndim == 2 else "volume_voxels",
+    "perimeter": "perimeter_px",
+    "equivalent_diameter_area": "equivalent_diameter_px",
+    **{ f"centroid-{i}": f"centroid_{axis}"
+        for i, axis in enumerate(axes)},
+    }
+
+    morphology = {column_names.get(name, name): values
+                                    for name, values in morphology.items()}
+
+    columns = [
+    *morphology,
+    "reference_mean",
+    "reference_median",
+    "reference_integrated",
+]
+    legacy = (
         "threshold", "mean", "median", "max", "integrated",
         "positive_area_px", "positive_fraction", "positive_cell",
-        "pearson_r", "positive_jaccard", "manders_m1_reference", "manders_m2_signal",
-    ]
-    columns = [
-        "tile_y", "tile_x", "cell_id", "centroid_y", "centroid_x",
-        "area_px", "perimeter_px", "equivalent_diameter_px",
-        "eccentricity", "solidity",
-        "reference_mean", "reference_median", "reference_integrated",
-    ]
-    columns.extend(f"signal_{name}_{suffix}" for name in signal_data for suffix in signal_suffixes)
+        "pearson_r", "positive_jaccard", "manders_m1_reference",
+        "manders_m2_signal",
+    )
+    for signal_name, (gd, spec) in signal_data.items():
+        if gd.shape != masks.shape:
+            raise ValueError(f"Signal {signal_name!r} must match the masks.")
+        if signal_name not in backgrounds:
+            raise ValueError(f"Missing background for signal {signal_name!r}.")
+        result = backgrounds[signal_name]
+        if not {"background", "sigma"}.issubset(result):
+            raise ValueError(f"Background for {signal_name!r} needs background and sigma.")
+        level, sigma = result["background"], result["sigma"]
+        if np.ndim(level) != 0 or not np.isfinite(level):
+            raise ValueError("Measurement requires a finite scalar background.")
+        if np.ndim(sigma) != 0 or np.isinf(sigma) or sigma < 0:
+            raise ValueError("Background sigma must be nonnegative or NaN when unavailable.")
+        columns.extend(f"signal_{signal_name}_{suffix}" for suffix in legacy)
+        columns.extend(f"signal_{signal_name}_{suffix}" for suffix in _distribution_suffixes(spec))
+
+    thresholds = {name: signal_threshold(image, spec)
+              for name, (image, spec) in signal_data.items()}
+    ref_threshold = _otsu_or_constant(reference_image)
+    # Batch the standard morphology properties to reduce Python overhead.
+    # RegionProperties objects are still used for cached coordinates and by
+
+   
+    regions = regionprops(masks)
     rows = [
-        _measure_region(region, reference, reference_threshold, signal_data, thresholds, tile_yx)
-        for region in regionprops(labels)
+        _measure_region(
+            region, index, morphology, reference_image, ref_threshold,
+            signal_data, thresholds, backgrounds,
+        )
+        for index, region in enumerate(regions)
     ]
     return pd.DataFrame(rows, columns=columns)
 
 
-def _measure_region(  # pylint: disable=too-many-arguments
-    region,
-    reference: np.ndarray,
-    reference_threshold: float,
-    signal_data: dict[str, tuple[np.ndarray, SignalChannel]],
-    thresholds: dict[str, float],
-    tile_yx: tuple[int, int],
+def _measure_region(
+    region, index, morphology, reference, reference_threshold,
+    signal_data, thresholds, backgrounds,
 ) -> dict:
-    """Assemble the full measurement row for one labeled region."""
+    """Build one complete measurement row for a labeled cell region.
+
+    Reference morphology and raw intensity are calculated first. Each signal
+    then contributes raw legacy colocalization values and distributional values
+    generated from its already-estimated image-level background.
+    """
     coords = region.coords
-    ref_values = reference[coords[:, 0], coords[:, 1]]
-    reference_positive = ref_values > reference_threshold
-    ref_weights = _positive_weights(ref_values, reference_threshold)
-    row: dict[str, float | int | bool] = {
-        "tile_y": tile_yx[0],
-        "tile_x": tile_yx[1],
-        "cell_id": int(region.label),
-        "centroid_y": float(region.centroid[0]) + tile_yx[0],
-        "centroid_x": float(region.centroid[1]) + tile_yx[1],
-        "area_px": int(region.area),
-        "perimeter_px": float(region.perimeter),
-        "equivalent_diameter_px": float(region.equivalent_diameter_area),
-        "eccentricity": float(region.eccentricity),
-        "solidity": float(region.solidity),
+    indices = tuple(coords.T)
+    ref_values = reference[indices]
+    ref_positive, ref_weights = ref_values > reference_threshold, _positive_weights(ref_values, reference_threshold)
+    row = {name: values[index]
+        for name, values in morphology.items()}
+    
+    row.update({
         "reference_mean": _nan_stat(np.mean, ref_values),
         "reference_median": _nan_stat(np.median, ref_values),
         "reference_integrated": _nan_stat(np.sum, ref_values),
-    }
+    })
     for name, (image, spec) in signal_data.items():
-        row.update(
-            _measure_signal(
-                coords, image, spec, thresholds[name], ref_values, reference_positive, ref_weights
-            )
-        )
+        values = image[indices]
+        row.update(_measure_signal(values, name, thresholds[name], ref_values, ref_positive, ref_weights, spec))
+        row.update(_distribution_row(values, coords, backgrounds[name]["background"], backgrounds[name]["sigma"], name, noise_normalize=spec.noise_normalize, asinh_scale=spec.asinh_scale, tail_fraction=spec.tail_fraction, quantiles=spec.quantiles, noise_thresholds=spec.noise_thresholds))
     return row
 
 
-def _measure_signal(  # pylint: disable=too-many-arguments
-    coords: np.ndarray,
-    image: np.ndarray,
-    spec: SignalChannel,
-    threshold: float,
-    ref_values: np.ndarray,
-    reference_positive: np.ndarray,
-    ref_weights: np.ndarray,
-) -> dict:
-    """Compute all signal-vs-reference colocalization metrics for one mask region."""
-    values = np.asarray(image, dtype=float)[coords[:, 0], coords[:, 1]]
-    positive = values > threshold
-    signal_weights = _positive_weights(values, threshold)
-    prefix = f"signal_{spec.name}_"
-    return {
-        f"{prefix}threshold": threshold,
-        f"{prefix}mean": _nan_stat(np.mean, values),
-        f"{prefix}median": _nan_stat(np.median, values),
-        f"{prefix}max": _nan_stat(np.max, values),
-        f"{prefix}integrated": _nan_stat(np.sum, values),
-        f"{prefix}positive_area_px": int(np.count_nonzero(positive)),
-        f"{prefix}positive_fraction": float(np.mean(positive)),
-        f"{prefix}positive_cell": bool(np.mean(positive) >= spec.positive_fraction_cutoff),
-        f"{prefix}pearson_r": _pearson(ref_values, values),
-        f"{prefix}positive_jaccard": _safe_ratio(
-            np.count_nonzero(positive & reference_positive),
-            np.count_nonzero(positive | reference_positive),
-        ),
-        f"{prefix}manders_m1_reference": _safe_ratio(
-            np.sum(ref_weights[positive]), np.sum(ref_weights)
-        ),
-        f"{prefix}manders_m2_signal": _safe_ratio(
-            np.sum(signal_weights[reference_positive]), np.sum(signal_weights)
-        ),
-    }
+def _measure_signal(values, name, threshold, ref_values, reference_positive, ref_weights, spec) -> dict:
+    """Return legacy raw-intensity and threshold-based colocalization outputs.
+
+    No background subtraction, noise normalization, or nonlinear transform is
+    performed here. This separation keeps historical ``signal_<name>_*``
+    positivity and Manders values directly comparable with older analyses.
+    """
+    positive, signal_weights = values > threshold, _positive_weights(values, threshold)
+    prefix = f"signal_{name}_"
+    return {f"{prefix}threshold": threshold,
+            f"{prefix}mean": _nan_stat(np.mean, values),
+            f"{prefix}median": _nan_stat(np.median, values),
+            f"{prefix}max": _nan_stat(np.max, values),
+            f"{prefix}integrated": _nan_stat(np.sum, values),
+            f"{prefix}positive_area_px": int(np.count_nonzero(positive)),
+            f"{prefix}positive_fraction": float(np.mean(positive)),
+            f"{prefix}positive_cell": bool(np.mean(positive) >= spec.positive_fraction_cutoff),
+            f"{prefix}pearson_r": _pearson(ref_values, values),
+            f"{prefix}positive_jaccard": _safe_ratio(np.count_nonzero(positive & reference_positive), np.count_nonzero(positive | reference_positive)),
+            f"{prefix}manders_m1_reference": _safe_ratio(np.sum(ref_weights[positive]), np.sum(ref_weights)),
+            f"{prefix}manders_m2_signal": _safe_ratio(np.sum(signal_weights[reference_positive]), np.sum(signal_weights))}
+
+
+def _distribution_row(values, coords, background, sigma, name, noise_normalize=False, asinh_scale=None, tail_fraction=0.1, quantiles=(0.25, 0.5, 0.75), noise_thresholds=(1.0,)) -> dict:
+    """Return one cell's background-corrected distributional signal outputs.
+
+    ``corrected_*`` fields are calculated from ``values - background`` in raw
+    intensity units. A separate temporary array is divided by ``sigma`` only
+    when ``noise_normalize`` is enabled and transformed with
+    ``asinh(value / asinh_scale)`` only when requested. Quantiles, IQR, and
+    upper-tail mean use that temporary array. ``frac_above_z*`` always uses
+    untransformed corrected values divided by ``sigma``.
+    """
+    prefix = f"signal_{name}_"
+    background_values, corrected = background, np.asarray(values, dtype=float) - float(background)
+    transformed = corrected.copy()
+
+    if noise_normalize and np.isfinite(sigma) and sigma > 0:
+        transformed /= sigma
+    if asinh_scale is not None:
+        transformed = np.arcsinh(transformed / asinh_scale)
+
+    finite = transformed[np.isfinite(transformed)]
+    # np.quantile partitions its input.  Calling it once per requested
+    # quantile repeated that work (ten times with the default configuration).
+    # Include the IQR endpoints in the same call and reuse the results.
+    requested = tuple(quantiles)
+    if finite.size:
+        quantile_levels = np.asarray((*requested, 0.25, 0.75), dtype=float)
+        quantile_values = np.quantile(finite, quantile_levels)
+        iqr = float(quantile_values[-1] - quantile_values[-2])
+    else:
+        quantile_values = np.full(len(requested) + 2, np.nan)
+        iqr = np.nan
+    result = {f"{prefix}bg_level": _nan_stat(np.median, background_values), f"{prefix}bg_sigma": float(sigma), f"{prefix}iqr": iqr, f"{prefix}corrected_mean": _nan_stat(np.mean, corrected), f"{prefix}corrected_median": _nan_stat(np.median, corrected), f"{prefix}corrected_integrated": _nan_stat(np.sum, corrected), f"{prefix}tail_mean": _tail_mean(transformed, tail_fraction)}
+    for quantile, value in zip(requested, quantile_values):
+        result[f"{prefix}{_quantile_label(quantile)}"] = float(value)
+    z_values = corrected / sigma if np.isfinite(sigma) and sigma > 0 else np.full(corrected.shape, np.nan)
+    for threshold in noise_thresholds:
+        result[f"{prefix}frac_above_z{_threshold_label(threshold)}"] = float(np.nanmean(z_values > threshold)) if np.any(np.isfinite(z_values)) else np.nan
+    return result
 
 
 def summarize_cells(cells: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate the per-cell table to one summary row per image/reference-set pair.
+    """Aggregate cells to image/reference-set rows, with cells as replicates."""
 
-    Args:
-        cells: Per-cell DataFrame as returned by :func:`measure_masks` with
-            ``source`` and ``reference_set`` columns already inserted.  Expected
-            to also contain ``cell_id``, ``area_px``, any
-            ``signal_*_positive_cell`` columns, and any ``signal_*_mean``
-            columns.
+    groups = ["source", "reference_set"]
+    aggregations = {"cell_count": ("cell_id", "count"),}
 
-    Returns:
-        DataFrame with one row per ``(source, reference_set)`` group.  Columns
-        include cell count, total/mean/median cell area, a positive-cell count
-        for each signal, and a mean intensity for each signal channel.  Returns
-        a minimal skeleton DataFrame when ``cells`` is empty.
-    """
-    if cells.empty:
-        return pd.DataFrame(columns=["source", "reference_set", "cell_count"])
+    for size_column in ("area_px", "volume_voxels"):
+        if size_column in cells.columns:
+            aggregations.update({f"total_cell_{size_column}": (
+                size_column, lambda values: values.sum(min_count=1),
+            ),
+            f"mean_cell_{size_column}": (size_column, "mean"),
+            f"median_cell_{size_column}": (size_column, "median"),
+        })
 
-    group_columns = ["source", "reference_set"]
-    base = (
-        cells.groupby(group_columns, sort=False)
-        .agg(
-            cell_count=("cell_id", "count"),
-            total_cell_area_px=("area_px", "sum"),
-            mean_cell_area_px=("area_px", "mean"),
-            median_cell_area_px=("area_px", "median"),
-        )
-        .reset_index()
-    )
-    positive_columns = [
-        column for column in cells.columns if column.endswith("_positive_cell")
-    ]
-    intensity_columns = [
-        column
-        for column in cells.columns
-        if column.endswith("_mean") and column.startswith("signal_")
-    ]
-    for column in positive_columns:
-        counts = cells.groupby(group_columns, sort=False)[column].sum().rename(f"{column}_count")
-        base = base.merge(counts.reset_index(), on=group_columns, how="left")
-    for column in intensity_columns:
-        means = cells.groupby(group_columns, sort=False)[column].mean().rename(f"mean_{column}")
-        base = base.merge(means.reset_index(), on=group_columns, how="left")
+    base = (cells.groupby(groups, sort=False).agg(**aggregations).reset_index())
+
+    signal_columns = [c for c in cells if c.startswith("signal_")]
+    wanted = [c for c in signal_columns if c.endswith("_positive_cell") or (c.endswith("_mean") and not c.endswith(("_corrected_mean", "_tail_mean"))) or any(token in c for token in ("_corrected_median", "_corrected_integrated", "_q50", "_q90", "_tail_mean", "_frac_above_z"))]
+    for column in dict.fromkeys(wanted):
+        values = cells.groupby(groups, sort=False)[column].sum() if column.endswith("_positive_cell") else cells.groupby(groups, sort=False)[column].mean()
+        name = f"{column}_count" if column.endswith("_positive_cell") else f"mean_{column}"
+        base = base.merge(values.rename(name).reset_index(), on=groups, how="left")
     return base
 
 
-def _nan_stat(function, values: np.ndarray) -> float:
-    """Apply a reduction function over finite values, returning NaN for empty arrays."""
-    finite = values[np.isfinite(values)]
+
+def _hist_mode(values):
+    """Return the midpoint of the most populated automatic histogram bin."""
+    values = np.asarray(values, dtype=float)
+    if not values.size or np.all(values == values[0]):
+        return float(values[0]) if values.size else np.nan
+    counts, edges = np.histogram(values, bins="auto")
+    index = int(np.argmax(counts))
+    return float((edges[index] + edges[index + 1]) / 2)
+
+
+
+def _distribution_suffixes(spec):
+    """Return output suffixes emitted by :func:`_distribution_row` for a spec."""
+    return ("bg_level", "bg_sigma", *(_quantile_label(q) for q in spec.quantiles), "iqr", "corrected_mean", "corrected_median", "corrected_integrated", "tail_mean", *(f"frac_above_z{_threshold_label(t)}" for t in spec.noise_thresholds))
+
+
+def _fast_solidity(region) -> float:
+    """Return skimage-compatible solidity without one Qhull call per cell.
+
+    On Windows, SciPy's Qhull wrapper opens a temporary file for every hull,
+    making ``RegionProperties.solidity`` unusually expensive for images with
+    thousands of cells.  OpenCV computes the same 2-D hull in memory.  The
+    half-pixel diamond offsets and integer-grid inclusion below match
+    ``skimage.morphology.convex_hull_image`` semantics.
+    """
+    if cv2 is None:
+        return float(region.solidity)
+
+    image = np.ascontiguousarray(region.image, dtype=np.uint8)
+    occupied_rows = np.flatnonzero(np.any(image, axis=1))
+    occupied_cols = np.flatnonzero(np.any(image, axis=0))
+    left = np.argmax(image[occupied_rows], axis=1)
+    right = image.shape[1] - 1 - np.argmax(image[occupied_rows, ::-1], axis=1)
+    top = np.argmax(image[:, occupied_cols], axis=0)
+    bottom = image.shape[0] - 1 - np.argmax(image[::-1, occupied_cols], axis=0)
+    candidates = np.concatenate(
+        (
+            np.column_stack((occupied_rows, left)),
+            np.column_stack((top, occupied_cols)),
+            np.column_stack((occupied_rows, right)),
+            np.column_stack((bottom, occupied_cols)),
+        )
+    )
+    offsets = np.asarray(((-0.5, 0), (0.5, 0), (0, -0.5), (0, 0.5)))
+    points = np.unique(
+        (candidates[:, None, :] + offsets).reshape(-1, 2), axis=0
+    ).astype(np.float32, copy=False)
+    vertices = cv2.convexHull(points, returnPoints=True).reshape(-1, 2)
+    convex_area = np.count_nonzero(grid_points_in_poly(image.shape, vertices))
+    return float(region.area / convex_area) if convex_area else np.nan
+
+
+def _quantile_label(value): return f"q{int(round(value * 100)):02d}"
+def _threshold_label(value): return str(int(value)) if float(value).is_integer() else str(value).replace(".", "p")
+def _tail_mean(values, fraction):
+    finite = np.asarray(values)[np.isfinite(values)]
+    if not finite.size: return np.nan
+    count = max(1, int(np.ceil(finite.size * fraction)))
+    return float(np.mean(np.partition(finite, finite.size - count)[-count:]))
+def _nan_stat(function, values):
+    finite = np.asarray(values)[np.isfinite(values)]
     return float(function(finite)) if finite.size else np.nan
-
-
-def _pearson(left: np.ndarray, right: np.ndarray) -> float:
-    """Return the Pearson correlation coefficient, ignoring non-finite value pairs."""
-    finite = np.isfinite(left) & np.isfinite(right)
-    left, right = left[finite], right[finite]
-    if left.size < 2 or np.std(left) == 0 or np.std(right) == 0:
-        return np.nan
+def _pearson(left, right):
+    finite = np.isfinite(left) & np.isfinite(right); left, right = left[finite], right[finite]
+    if left.size < 2 or np.std(left) == 0 or np.std(right) == 0: return np.nan
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return float(np.corrcoef(left, right)[0, 1])
-
-
-def _otsu_or_constant(image: np.ndarray) -> float:
-    """Return the Otsu threshold, or the constant pixel value when the image is uniform."""
-    finite = image[np.isfinite(image)]
-    if finite.size == 0:
-        return np.nan
-    if np.all(finite == finite[0]):
-        return float(finite[0])
-    return float(threshold_otsu(finite))
-
-
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    """Return numerator / denominator, or NaN when denominator is zero."""
-    return float(numerator / denominator) if denominator > 0 else np.nan
-
-
-def _positive_weights(values: np.ndarray, threshold: float) -> np.ndarray:
-    """Return per-pixel weights clipped to zero at or below the threshold baseline."""
-    finite = values[np.isfinite(values)]
-    baseline = threshold if np.isfinite(threshold) else (np.min(finite) if finite.size else 0)
-    return np.clip(values - baseline, 0, None)
+        warnings.simplefilter("ignore"); return float(np.corrcoef(left, right)[0, 1])
+def _otsu_or_constant(image):
+    finite = np.asarray(image)[np.isfinite(image)]
+    if not finite.size: return np.nan
+    return float(finite[0]) if np.all(finite == finite[0]) else float(threshold_otsu(finite))
+def _safe_ratio(numerator, denominator): return float(numerator / denominator) if denominator > 0 else np.nan
+def _positive_weights(values, threshold):
+    finite = np.asarray(values)[np.isfinite(values)]
+    return np.clip(values - (threshold if np.isfinite(threshold) else (np.min(finite) if finite.size else 0)), 0, None)

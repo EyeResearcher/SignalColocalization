@@ -58,6 +58,7 @@ def test_cli_without_json_uses_complete_defaults():
     assert config.z_projection == "max"
     assert config.device == "auto"
     assert config.save_masks is True
+    assert config.promote_2d_to_3d is False
 
 
 def test_cli_accepts_all_serializable_config_fields(tmp_path):
@@ -105,6 +106,7 @@ def test_cli_accepts_all_serializable_config_fields(tmp_path):
                 "1",
                 "--z-projection",
                 "mean",
+                "--promote-2d-to-3d",
                 "--device",
                 "cuda:1",
                 "--no-save-masks",
@@ -141,6 +143,7 @@ def test_cli_accepts_all_serializable_config_fields(tmp_path):
     assert config.time_index == 2
     assert config.scene_index == 1
     assert config.z_projection == "mean"
+    assert config.promote_2d_to_3d is True
     assert config.device == "cuda:1"
     assert config.save_masks is False
 
@@ -168,6 +171,59 @@ def test_cli_options_override_json_values(tmp_path):
     assert config.input_dir == tmp_path / "images"
     assert config.device == "cpu"
     assert config.reference_sets[0].channel == "DAPI"
+
+
+def test_cli_configures_tissue_filtered_oop_background():
+    config = config_from_args(
+        build_parser().parse_args(
+            [
+                "--background-method",
+                "tissue_filtered_oop",
+                "--tissue-channel",
+                "DAPI",
+                "--background-buffer-px",
+                "4",
+                "--background-dapi-threshold",
+                "2.5",
+                "--background-percentile",
+                "40",
+                "--debris-percentile",
+                "97",
+                "--debris-min-area-cell-sd",
+                "3",
+                "--debris-buffer-px",
+                "2",
+                "--debris-thresh-property",
+                "area",
+                "--prop-percentile-thresh",
+                "75",
+            ]
+        )
+    )
+
+    signal = config.signal_channels[0]
+    assert signal.background_method == "tissue_filtered_oop"
+    assert signal.tissue_channel == "DAPI"
+    assert signal.background_buffer_px == 4
+    assert signal.background_dapi_threshold == 2.5
+    assert signal.background_percentile == 40
+    assert signal.debris_percentile == 97
+    assert signal.debris_min_area_cell_sd == 3
+    assert signal.debris_buffer_px == 2
+    assert signal.debris_thresh_property == ["area"]
+    assert signal.prop_percentile_thresh == 75
+
+
+def test_cli_configures_fixed_background():
+    config = config_from_args(
+        build_parser().parse_args(
+            ["--background-method", "fixed", "--background-fixed-value", "120"]
+        )
+    )
+
+    signal = config.signal_channels[0]
+    assert signal.background_method == "fixed"
+    assert signal.background_fixed_value == 120
 
 
 def test_save_segmentation_writes_grid_and_each_panel_to_requested_dir(

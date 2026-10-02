@@ -136,6 +136,7 @@ class ImageReader:
         self, data: np.ndarray, axes: Iterable[str] | str, path: Path
     ) -> np.ndarray:
         axes_list = [str(axis).upper() for axis in axes]
+        
         array = np.asarray(data)
         if len(axes_list) != array.ndim:
             raise ValueError(f"Axes {axes!r} do not match shape {array.shape} for {path}.")

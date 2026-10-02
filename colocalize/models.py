@@ -108,21 +108,15 @@ class CellposeSegmenter:  # pylint: disable=too-few-public-methods
     def segment(
         self,
         image: np.ndarray,
-        *,
-        diameter: float | None = None,
-        flow_threshold: float = 0.4,
-        cellprob_threshold: float = 0.0,
-        min_size: int = 15,
-        normalize: bool = True,
+        progress: bool = True,
+        **cellpose_kwargs
     ) -> tuple[np.ndarray, object]:
         """Return an integer label image and Cellpose flow output."""
+        
         result = self.model.eval(
             np.asarray(image),
-            diameter=diameter,
-            flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold,
-            min_size=min_size,
-            normalize=normalize,
+            progress=progress,
+            **cellpose_kwargs,
         )
         masks, flows = result[0], result[1]
         return np.asarray(masks, dtype=np.int32), flows
@@ -136,6 +130,7 @@ class CellposeSegmenter:  # pylint: disable=too-few-public-methods
         cellprob_threshold: float = 0.0,
         min_size: int = 15,
         normalize: bool = True,
+        progress: bool = True,
         batch_size: int = 8,
     ) -> list[np.ndarray]:
         """Segment a list of images in batched forward passes.
@@ -171,7 +166,7 @@ class CellposeSegmenter:  # pylint: disable=too-few-public-methods
                 cellprob_threshold=cellprob_threshold,
                 min_size=min_size,
                 normalize=normalize,
-                progress=True,
+                progress=progress,
             )
             masks_out = result[0]
             # model.eval with a list returns a list; guard against single-array edge case

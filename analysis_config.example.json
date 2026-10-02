@@ -13,16 +13,30 @@
       "normalize": true
     }
   ],
+  "tissue_channel": {
+    "name": "DAPI",
+    "channel": 4,
+    "threshold": 1.0,
+    "min_object_px": 5000,
+    "fill_holes": false
+  },
   "signal_channels": [
     {
       "name": "GD",
       "channel": 2,
       "threshold_method": "percentile",
       "threshold_value": 99.5,
-      "positive_fraction_cutoff": 0.05
+      "positive_fraction_cutoff": 0.05,
+      "background_method": "tissue_filtered_oop",
+      "debris_percentile": 96,
+      "debris_min_area_cell_sd": 5,
+      "debris_buffer_px": 0,
+      "noise_normalize": false,
+      "asinh_scale": null
     }
   ],
   "z_projection": "max",
+  "promote_2d_to_3d": false,
   "time_index": 0,
   "scene_index": 0,
   "device": "auto",

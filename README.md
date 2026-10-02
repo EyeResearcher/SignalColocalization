@@ -162,13 +162,69 @@ Signal-channel options:
 | --- | --- | --- |
 | `name` | yes | Unique signal label used in output column names |
 | `channel` | yes | Zero-based index or metadata channel name |
-| `threshold_method` | no | `otsu`, `percentile`, `absolute`, or `none`; default `otsu` |
+| `threshold_method` | no | `otsu`, `percentile`, `absolute`, `percent_of_max`, or `none`; default `otsu` |
 | `threshold_value` | sometimes | Percentile (default `99`) or absolute intensity cutoff; required for `absolute` |
 | `positive_fraction_cutoff` | no | Fraction of mask pixels above threshold needed to call a cell positive; default `0.80` |
+| `background_method` | no | `none` (default), `fixed`, `median`, `percentile`, or `tissue_filtered_oop` |
+| `tissue_channel` | for `tissue_filtered_oop` | Per-signal raw tissue/DAPI channel; overrides the top-level tissue channel |
+| `background_buffer_px` | no | Mask dilation before sampling extracellular background; default `3` |
+| `background_anchor_percentile` | for `percentile` | Percentile of the extracellular sample; default `15` |
+| `background_percentile` | for `tissue_filtered_oop` | Percentile of the filtered tissue sample used as the scalar background; default `50` |
+| `background_fixed_value` | for `fixed` | Known scalar background in original intensity units |
+| `background_dapi_threshold` | for `tissue_filtered_oop` | Absolute DAPI threshold defining tissue; default `1` |
+| `debris_percentile` | for `tissue_filtered_oop` | Signal percentile used to identify bright debris candidates; default `96` |
+| `debris_thresh_property` | for `tissue_filtered_oop` | Cell/debris property, or properties, used to reject large bright objects; default `area` |
+| `debris_min_area_cell_sd` | for `tissue_filtered_oop` | Property threshold in standard deviations above the cell mean; default `5` |
+| `debris_buffer_px` | for `tissue_filtered_oop` | Radius used to morphologically close bright debris candidates; default `0` |
+| `prop_percentile_thresh` | for `tissue_filtered_oop` | Cell-property percentile used when `debris_min_area_cell_sd` is zero; default `50` |
+| `noise_normalize` | no | Divide distributional values by robust MAD noise scale; default `false` |
+| `asinh_scale` | no | Optional long-tail compression scale; preserves zero and negative corrected values |
+
+`tissue_channel` is an optional top-level object. Its `channel` selects the raw
+tissue image supplied to `tissue_filtered_oop`; a signal-level `tissue_channel`
+overrides it. The tissue threshold used by this method is the signal's
+`background_dapi_threshold`.
+
+Every cell now also receives a background level/noise scale, corrected summary
+statistics, quantiles, an upper-tail mean, and per-pixel extent above configured
+noise thresholds. The legacy raw intensity and threshold-based columns remain
+available. Use the same optional `asinh_scale` across images when comparing
+transformed distributions.
+
+Background computation is separate from measurement. `_process_signal()` computes
+one diagnostic dictionary per signal/reference-mask set, then passes those results
+to `measure_masks(..., backgrounds=...)`. Raw channels are passed unchanged; cell
+measurements subtract the background exactly once.
+
+For simple images, select the median of finite pixels outside buffered cells:
+
+```python
+SignalChannel(name="GD", channel=2, background_method="median", background_buffer_px=3)
+```
+
+Use `background_method="percentile", background_anchor_percentile=10` for a low
+percentile, `background_method="none"` for no subtraction, or
+`background_method="fixed", background_fixed_value=120` for a known constant.
+These methods require no DAPI image. Median/percentile sample the entire field
+outside cells; if this includes unwanted black/off-tissue pixels, use a suitable
+region mask with `compute_background(..., region_mask=...)` or the full workflow.
+
+Use `background_method="tissue_filtered_oop"` for DAPI-thresholded tissue,
+cell buffering, cell-property-based bright-debris exclusion, a configurable
+final percentile, and robust MAD noise estimation. Zero cell buffering means no
+dilation. Re-run analysis before plotting/exporting corrected results.
+
+Every dispatcher result includes `background`, `sigma`, `sample_mask`, `method`,
+and the existing diagnostic masks. `otsu_cutoff` and debris thresholds are `None`
+when those filters are unused. `none`/`fixed` return unknown noise (`NaN`) and empty
+sample masks; their noise-relative fractions are unavailable. Background-distribution
+workflow slides require a sampled method and reject `none`/`fixed` explicitly.
 
 Important analysis options include:
 
 - `z_projection`: `max`, `mean`, or `first` (default `max`).
+- `promote_2d_to_3d`: when `true`, allows 2D channels to be broadcast across Z
+  when reusing 3D masks that share YX dimensions (default `false`).
 - `time_index` and `scene_index`: zero-based indices (both default to `0`).
 - `recursive`: search subdirectories when `true` (default `false`).
 - `exclude`: filenames, relative paths, absolute paths, or glob patterns to skip.
@@ -429,6 +485,57 @@ Legacy `analysis_config.json` plus command-line source arguments remains
 supported. A job file and legacy config cannot be supplied together.
 
 ## Outputs
+
+### Percentage proxies alongside cumulative distributions
+
+Use `summarize_signal_ecdf` to report **100 × [1 − CDF(cutoff)]**, the percentage
+of cells with a measurement **strictly greater** than each cutoff. Values equal
+to the cutoff are excluded from the positive tail. The output includes positive,
+valid, and excluded cell counts; missing/nonfinite measurements are excluded
+from the denominator, and groups with no valid measurements receive NaN.
+
+```python
+from colocalize import summarize_signal_ecdf, plot_signal_ecdf
+
+options = dict(metric="corrected_median", thresholds=(0, 1, 2, 3),
+               normalize_by_noise=True)
+percentages = summarize_signal_ecdf(cells, "HD", **options)
+fig = plot_signal_ecdf(cells[cells.reference_set.eq("RPBMS")], "HD", **options)
+```
+
+The noise-normalized median is the background-subtracted cell median divided
+by its saved robust background sigma. This sweep reports cells above background
+and background + 1, 2, or 3 sigma. Invalid or zero sigma is excluded; use
+`normalize_by_noise=False, thresholds=(0,)` for a background-only percentage
+that does not require sigma. Arbitrary fixed cutoffs, including a future
+negative-control cutoff, are supported in the selected metric's units. Noise
+normalization is restricted to untransformed `corrected_mean`/`corrected_median`.
+Noise multiples are descriptive cutoffs, not p-values or calibrated error rates.
+
+For an extent-based proxy, use `metric="frac_above_z3"`,
+`thresholds=(0.1, 0.5, 0.8)`, and `normalize_by_noise=False`. These are the
+percentages of cells with **more than 10%, 50%, or 80% of their pixels** above
+background + 3 sigma. This requires the corresponding saved pixel-fraction column.
+The strict `>` convention differs from legacy `positive_fraction_cutoff`'s `>=`.
+
+These metrics describe signal enrichment within reference masks. A cutoff of
+zero alone does not establish specific labeling; without negative controls,
+report the cutoff sweep rather than selecting a single apparent colocalization
+percentage. They do not replace intensity-based Manders coefficients or prove
+molecular interaction (see [ImageJ's colocalization documentation](https://imagej.net/imaging/colocalization-analysis)).
+Default summaries keep images and reference sets separate. For treatment
+comparisons, aggregate image percentages within biological samples; pooling
+cells across images weights images by cell count.
+
+Export all three summaries and annotated ECDF plots from an existing cell table:
+
+```powershell
+python -m scripts.export_ecdf_metrics --cells cells.csv --signal HD
+```
+
+The default destination is `presentation_figures/ecdf_metrics/`. The CSV contains
+one row per image/reference set/proxy/cutoff; extent plots are omitted if their
+input column is absent. The notebook includes the same export after its ECDFs.
 
 Each run writes:
 

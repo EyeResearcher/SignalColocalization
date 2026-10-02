@@ -10,10 +10,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import tifffile
 
-from .datasets import AnalysisConfig, ReferenceSet, SignalChannel
+from .datasets import BACKGROUND_METHODS, AnalysisConfig, ReferenceSet, SignalChannel, TissueChannel
 from .models import resolve_model_source
 from .pipeline import build_dataset, inspect_inputs, run_analysis
-from .visualization import save_segmentation_views, show_segmentation
+from .visualization import show_segmentation, make_segmentation_views
+from .io import save_segmentation_views
 
 
 CLI_DEFAULTS = {
@@ -41,6 +42,7 @@ CLI_DEFAULTS = {
     "save_masks": True,
     "save_segmentation": False,
     "segmentation_output_dir": None,
+    "promote_2d_to_3d": False,
 }
 
 
@@ -77,11 +79,12 @@ def config_from_mapping(values: dict, *, base_dir: str | Path = ".") -> Analysis
 
     if "extensions" in values:
         values["extensions"] = tuple(values["extensions"])
-    if "tile_size" in values and values["tile_size"] is not None:
-        values["tile_size"] = tuple(values["tile_size"])
+    tissue_values = values.pop("tissue_channel", None)
+    tissue = TissueChannel(**tissue_values) if tissue_values is not None else None
     return AnalysisConfig(
         reference_sets=references,
         signal_channels=signals,
+        tissue_channel=tissue,
         **values,
     )
 
@@ -132,15 +135,20 @@ def save_or_show_segmentations(
                     f"{_safe_name(signal_spec.name)}_segmentation"
                 )
                 if save:
+
+                    seg_figures = make_segmentation_views(
+                        reference=reference_image,
+                        masks=masks,
+                        signal=signal_image,
+                        signal_spec=signal_spec,
+                        title=title,
+                        z_index=None,
+                    )
                     saved.extend(
                         save_segmentation_views(
-                            reference_image,
-                            masks,
-                            signal_image,
+                            figures=seg_figures,
                             output_dir=qc_dir,
                             name=name,
-                            signal_spec=signal_spec,
-                            title=title,
                         )
                     )
                 if show:
@@ -293,7 +301,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
     )
     signal.add_argument(
         "--threshold-method",
-        choices=("otsu", "percentile", "absolute", "none"),
+        choices=("otsu", "percentile", "absolute", "none", "percent_of_max"),
         default=argparse.SUPPRESS,
         help="Default: otsu.",
     )
@@ -308,6 +316,62 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=argparse.SUPPRESS,
         help="Default: 0.80.",
+    )
+    signal.add_argument(
+        "--background-method", choices=BACKGROUND_METHODS,
+        default=argparse.SUPPRESS, help="Background correction method (default: none).",
+    )
+    signal.add_argument(
+        "--background-fixed-value", type=float, default=argparse.SUPPRESS,
+        help="Known scalar background required by --background-method fixed.",
+    )
+    signal.add_argument(
+        "--background-anchor-percentile", type=float, default=argparse.SUPPRESS,
+        help="Percentile used by --background-method percentile (default: 15).",
+    )
+    signal.add_argument(
+        "--background-percentile", type=float, default=argparse.SUPPRESS,
+        help="Final percentile used by tissue_filtered_oop (default: 50).",
+    )
+    signal.add_argument(
+        "--background-buffer-px", type=int, default=argparse.SUPPRESS,
+        help="Cell-mask dilation before background sampling (default: 3).",
+    )
+    signal.add_argument(
+        "--background-dapi-threshold", type=float, default=argparse.SUPPRESS,
+        help="Tissue-channel threshold used by tissue_filtered_oop (default: 1).",
+    )
+    signal.add_argument(
+        "--debris-percentile", type=float, default=argparse.SUPPRESS,
+        help="Bright-debris candidate percentile for tissue_filtered_oop (default: 96).",
+    )
+    signal.add_argument(
+        "--debris-min-area-cell-sd", type=float, default=argparse.SUPPRESS,
+        help="Cell-property SD multiplier for debris rejection (default: 5).",
+    )
+    signal.add_argument(
+        "--debris-buffer-px", type=int, default=argparse.SUPPRESS,
+        help="Morphological closing radius for debris candidates (default: 0).",
+    )
+    signal.add_argument(
+        "--debris-thresh-property", action="append", default=argparse.SUPPRESS,
+        help="Region property used for debris rejection; repeat for multiple properties.",
+    )
+    signal.add_argument(
+        "--prop-percentile-thresh", type=float, default=argparse.SUPPRESS,
+        help="Cell-property percentile used when the debris SD multiplier is zero.",
+    )
+    signal.add_argument(
+        "--tissue-channel", type=_channel_key, default=argparse.SUPPRESS,
+        help="Reference channel used to identify tissue for background sampling.",
+    )
+    signal.add_argument(
+        "--noise-normalize", action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS, help="Express distributional metrics in robust noise units.",
+    )
+    signal.add_argument(
+        "--asinh-scale", type=float, default=argparse.SUPPRESS,
+        help="Optional asinh scale for distributional metrics.",
     )
 
     analysis = parser.add_argument_group("analysis")
@@ -333,18 +397,13 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
         help="Save label TIFF masks (default: true).",
     )
     analysis.add_argument(
-        "--tile-size",
-        nargs=2,
-        type=int,
-        metavar=("HEIGHT", "WIDTH"),
-        default=argparse.SUPPRESS,
-        help="Crop images into non-overlapping tiles before segmentation. Default: disabled.",
-    )
-    analysis.add_argument(
-        "--stitch-masks",
+        "--promote-2d-to-3d",
         action=argparse.BooleanOptionalAction,
         default=argparse.SUPPRESS,
-        help="Stitch per-tile masks into a single full-image mask file (default: false).",
+        help=(
+            "Broadcast 2D channel images across Z when loaded masks are 3D and "
+            "match in YX only (default: false)."
+        ),
     )
 
 
@@ -385,6 +444,7 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
             save_masks=values["save_masks"],
             save_segmentation=values["save_segmentation"],
             segmentation_output_dir=values["segmentation_output_dir"],
+            promote_2d_to_3d=values["promote_2d_to_3d"],
         )
     else:
         config = load_config(args.config)
@@ -414,6 +474,20 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
             ("threshold_method", "threshold_method"),
             ("threshold_value", "threshold_value"),
             ("positive_fraction_cutoff", "positive_fraction_cutoff"),
+            ("background_method", "background_method"),
+            ("background_fixed_value", "background_fixed_value"),
+            ("background_anchor_percentile", "background_anchor_percentile"),
+            ("background_percentile", "background_percentile"),
+            ("background_buffer_px", "background_buffer_px"),
+            ("background_dapi_threshold", "background_dapi_threshold"),
+            ("debris_percentile", "debris_percentile"),
+            ("debris_min_area_cell_sd", "debris_min_area_cell_sd"),
+            ("debris_buffer_px", "debris_buffer_px"),
+            ("debris_thresh_property", "debris_thresh_property"),
+            ("prop_percentile_thresh", "prop_percentile_thresh"),
+            ("tissue_channel", "tissue_channel"),
+            ("noise_normalize", "noise_normalize"),
+            ("asinh_scale", "asinh_scale"),
         )
         if hasattr(args, argument)
     }
@@ -429,9 +503,9 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         "z_projection",
         "device",
         "save_masks",
+        "promote_2d_to_3d",
         "save_segmentation",
         "segmentation_output_dir",
-        "stitch_masks",
     ):
         if hasattr(args, argument):
             setattr(config, argument, getattr(args, argument))
@@ -439,8 +513,6 @@ def config_from_args(args: argparse.Namespace) -> AnalysisConfig:
         config.exclude = tuple(args.exclude)
     if hasattr(args, "extensions"):
         config.extensions = tuple(args.extensions)
-    if hasattr(args, "tile_size") and args.tile_size is not None:
-        config.tile_size = tuple(args.tile_size)
     if config.segmentation_output_dir is not None and not (
         hasattr(args, "save_segmentation") and args.save_segmentation is False
     ):

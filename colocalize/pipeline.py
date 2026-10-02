@@ -2,79 +2,91 @@
 
 from __future__ import annotations
 
+from tqdm import tqdm
 from fnmatch import fnmatchcase
 from pathlib import Path
-
-from tqdm.auto import tqdm
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
 import tifffile
 
 from .colocalize import measure_masks, summarize_cells
-from .datasets import AnalysisConfig, AnalysisResult, ImageDataset, ReferenceSet
+from .background import compute_background
+from .datasets import AnalysisConfig, AnalysisResult, ImageDataset, ReferenceSet, SignalChannel
 from .models import CellposeSegmenter
 from .readers import ImageReader, MicroscopyImage, discover_images
-from .tiling import generate_tiles, stitch_masks
-from .visualization import save_segmentation_views
+from .visualization import make_segmentation_views
+from .io import save_mask, save_segmentation_views
+
+
+def _align_image_to_masks(
+    image: np.ndarray,
+    masks: np.ndarray,
+    *,
+    image_name: str,
+    promote_2d_to_3d: bool,
+) -> np.ndarray:
+    """Return an image array aligned to mask dimensionality for measurement."""
+    image_array = np.asarray(image)
+    mask_array = np.asarray(masks)
+    if image_array.shape == mask_array.shape:
+        return image_array
+    if (
+        promote_2d_to_3d
+        and mask_array.ndim == 3
+        and image_array.ndim == 2
+        and image_array.shape == mask_array.shape[1:]
+    ):
+        return np.broadcast_to(image_array, mask_array.shape)
+    raise ValueError(
+        f"{image_name} shape {image_array.shape} does not match masks shape {mask_array.shape}. "
+        "Enable AnalysisConfig.promote_2d_to_3d to broadcast 2D images across Z for 3D masks."
+    )
 
 
 def inspect_inputs(config: AnalysisConfig) -> pd.DataFrame:
-    """List discovered image files with their shapes and channel metadata.
+    """List discovered image files with their post-transform shapes and channel names."""
+    return pd.DataFrame(
+        {
+            "source": image.path.name,
+            "path": str(image.path),
+            "shape_cyx": tuple(image.data.shape),
+            "channels": tuple(image.channel_names),
+        }
+        for image in build_dataset(config)
+    )
+def _get_masks(
+    mask_dir: Path, 
+    acquisition: MicroscopyImage, 
+    reference: ReferenceSet, 
+    config: AnalysisConfig,
+) -> tuple[np.ndarray, CellposeSegmenter | None]:
+    
+    source_dir = Path(config.mask_dir) if config.mask_dir is not None else mask_dir
+    mask_path = source_dir / f"{_safe_stem(acquisition.path)}__{reference.name}_masks.tif"
+    print(mask_path)
+    if config.load_masks and mask_path.is_file():
 
-    Useful for verifying that the correct files and channels are found before
-    committing to a full (expensive) segmentation run.
+        return tifffile.imread(mask_path), None
 
-    Args:
-        config: Analysis configuration specifying the input directory, file
-            extensions, scene/time indices, and transform chain.
+    segmenter = CellposeSegmenter(
+        reference.model, device=config.device
+    )
 
-    Returns:
-        DataFrame with one row per discovered image.  Columns are ``source``
-        (filename), ``path`` (absolute path string), ``shape_cyx`` (array
-        dimensions after transforms), and ``channels`` (channel-name tuple).
-    """
-    rows = []
-    for image in build_dataset(config):
-        path = image.path
-        rows.append(
-            {
-                "source": path.name,
-                "path": str(path),
-                "shape_cyx": tuple(image.data.shape),
-                "channels": tuple(image.channel_names),
-            }
-        )
-    return pd.DataFrame(rows)
+    masks, _ = segmenter.segment(
+        acquisition.channel(reference.channel),
+        progress=config.progress,
+        **reference.cellpose_kwargs,
 
-
+    )
+    return masks, segmenter
 def run_analysis(config: AnalysisConfig) -> AnalysisResult:
-    """Segment and measure every image found under ``config.input_dir``.
+    """Segment each reference set, measure signals, and optionally write outputs.
 
-    For each input image and each configured reference set, Cellpose is used to
-    segment the reference channel.  Every configured signal channel is then
-    measured inside those masks.  When ``config.tile_size`` is set the image is
-    split into non-overlapping tiles before segmentation and the per-tile
-    results are aggregated without double-counting.
-
-    The three inner loops (acquisitions → reference sets → tiles) are each
-    isolated in their own helper so that callers can wrap them with a progress
-    bar without modifying this function.
-
-    Args:
-        config: Fully populated :class:`~colocalize.datasets.AnalysisConfig`
-            describing input/output directories, channel assignments, Cellpose
-            model settings, and optional tiling parameters.
-
-    Returns:
-        :class:`~colocalize.datasets.AnalysisResult` containing the per-cell
-        and per-image summary DataFrames plus the paths of any saved mask and
-        segmentation QC files.  Tables are also written to
-        ``config.output_dir``.
-
-    Raises:
-        FileNotFoundError: If no images matching ``config.extensions`` are
-            found in ``config.input_dir``.
+    The optional raw tissue channel is loaded once per acquisition. Background
+    estimation is selected per signal and performed after each reference set
+    is segmented, before per-cell measurement.
     """
     paths = _input_paths(config)
     if not paths:
@@ -84,239 +96,201 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     mask_dir = config.output_dir / "masks"
     if config.save_masks:
         mask_dir.mkdir(parents=True, exist_ok=True)
+    qc_dir = (
+        config.segmentation_output_dir
+        if config.segmentation_output_dir is not None
+        else config.output_dir / "segmentation_qc"
+    )
 
     segmenters: dict[str, CellposeSegmenter] = {}
     tables: list[pd.DataFrame] = []
     mask_paths: list[Path] = []
     segmentation_paths: list[Path] = []
     analyzed_groups: list[dict[str, str]] = []
-
-    
+    progress = tqdm(total=len(build_dataset(config, paths)), desc="Processing acquisitions")
     for acquisition in build_dataset(config, paths):
-    
-        tile_iter = _build_tile_iter(acquisition.data, config)
-        for reference in config.reference_sets:
-            analyzed_groups.append(
-                {"source": acquisition.path.name, "reference_set": reference.name}
-            )
-            if reference.name not in segmenters:
-                segmenters[reference.name] = CellposeSegmenter(
-                    reference.model, device=config.device
-                )
-            ref_tables, ref_mask_paths, ref_seg_paths = _process_reference(
-                acquisition, reference, tile_iter, config, segmenters[reference.name], mask_dir
-            )
-            tables.extend(ref_tables)
-            mask_paths.extend(ref_mask_paths)
-            segmentation_paths.extend(ref_seg_paths)
 
+        tissue = acquisition.channel(config.tissue_channel.channel) if config.tissue_channel is not None else None
+        for reference in config.reference_sets:
+            analyzed_groups.append({"source": acquisition.path.name, "reference_set": reference.name})
+            masks, segmenter = _get_masks(
+                mask_dir=mask_dir,
+                acquisition=acquisition,
+                reference=reference,
+                config=config,
+            )
+
+            if reference.name not in segmenters and segmenter is not None:
+                segmenters[reference.name] = segmenter
+
+            # Loading an existing mask does not allocate GPU memory. Avoid
+            # initializing/touching CUDA in that path: besides adding overhead,
+            # a driver-level CUDA failure can terminate Python without a
+            # catchable traceback. Only clear the cache after segmentation.
+            if segmenter is not None:
+                _free_gpu_cache()
+
+            table, backgrounds = _process_signal(
+                acquisition=acquisition,
+                masks=masks,
+                reference=reference,
+                signal_channels=config.signal_channels,
+                tissue=tissue,
+                morphology_properties=config.morphology_properties,
+                promote_2d_to_3d=config.promote_2d_to_3d,
+            )
+            if config.progress:
+
+                print(f"Processing acquisition {acquisition.path.name}, reference set {reference.name}")
+                print(table.head())
+            table.insert(0, "reference_set", reference.name)
+            table.insert(0, "source", acquisition.path.name)
+            tables.append(table)
+
+            mask_paths.append(
+                save_mask(
+                    masks=masks,
+                    acquisition_path=acquisition.path,
+                    reference=reference,
+                    output_dir=mask_dir,
+                    save_masks=config.save_masks,
+                )
+            )
+            if config.save_segmentation:
+                for spec in config.signal_channels:
+                    reference_image = _align_image_to_masks(
+                        acquisition.channel(reference.channel),
+                        masks,
+                        image_name=f"reference channel {reference.name!r}",
+                        promote_2d_to_3d=config.promote_2d_to_3d,
+                    )
+                    signal_image = _align_image_to_masks(
+                        acquisition.channel(spec.channel),
+                        masks,
+                        image_name=f"signal channel {spec.name!r}",
+                        promote_2d_to_3d=config.promote_2d_to_3d,
+                    )
+                    seg_figures = make_segmentation_views(
+                        reference=reference_image,
+                        masks=masks,
+                        signal=signal_image,
+                        signal_spec=spec,
+                        title=f"{acquisition.path.name} | reference={reference.name}",
+                        z_index=None,
+                    )
+                    seg_paths = save_segmentation_views(
+                        figures=seg_figures,
+                        output_dir=qc_dir,
+                        name=f"{acquisition.path.stem}__{reference.name}_{spec.name}"
+                    )
+                    segmentation_paths.extend(seg_paths)
+
+        progress.update(1)
     cells = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
-    groups = pd.DataFrame(analyzed_groups)
-    images = groups.merge(
-        summarize_cells(cells),
-        on=["source", "reference_set"],
-        how="left",
+    images = pd.DataFrame(analyzed_groups).merge(
+        summarize_cells(cells), on=["source", "reference_set"], how="left"
     )
-    for column in (
-        "cell_count",
-        "total_cell_area_px",
-        "mean_cell_area_px",
-        "median_cell_area_px",
-    ):
-        if column not in images:
-            images[column] = 0
     images["cell_count"] = images["cell_count"].fillna(0).astype(int)
-    images["total_cell_area_px"] = images["total_cell_area_px"].fillna(0).astype(int)
-    result = AnalysisResult(
-        cells=cells,
-        images=images,
-        mask_paths=mask_paths,
-        segmentation_paths=segmentation_paths,
-    )
+
+    for size_column in ("area_px", "volume_voxels"):
+        total_column = f"total_cell_{size_column}"
+        if total_column in images.columns:
+            images.loc[
+                images["cell_count"].eq(0), total_column
+            ] = 0
+    result = AnalysisResult(cells, images, mask_paths, segmentation_paths)
     result.save_tables(config.output_dir)
     return result
 
 
-def _build_tile_iter(
-    data: np.ndarray,
-    config: AnalysisConfig,
-) -> list[tuple[np.ndarray, int, int]]:
-    """Return (tile_data, y0, x0) entries covering the image, or one entry for the full image."""
-    if config.tile_size is not None:
-        return list(generate_tiles(data, config.tile_size))
-    return [(data, 0, 0)]
-
-
-def _process_reference(  # pylint: disable=too-many-arguments
+def _process_signal(
+    *,
     acquisition: MicroscopyImage,
-    reference: ReferenceSet,
-    tile_iter: list[tuple[np.ndarray, int, int]],
-    config: AnalysisConfig,
-    segmenter: CellposeSegmenter,
-    mask_dir: Path,
-) -> tuple[list[pd.DataFrame], list[Path], list[Path]]:
-    """Segment and measure all tiles for one reference set on one acquisition.
-
-    Args:
-        acquisition: Transformed CYX image for the current file.
-        reference: Reference-set specification (channel, model, segmentation params).
-        tile_iter: Pre-built list of ``(tile_data, y0, x0)`` entries from
-            :func:`_build_tile_iter`.
-        config: Full analysis configuration.
-        segmenter: Already-loaded Cellpose model for this reference set.
-        mask_dir: Directory in which to write per-tile or stitched mask files.
-
-    Returns:
-        Three-tuple of ``(tables, mask_paths, segmentation_paths)`` for this
-        reference set.  Each list may be empty if the corresponding save option
-        is disabled.
-    """
-    # Build tile images once; all reference channels sent to Cellpose as a single batch.
-    tile_acqs = [
-        (
-            MicroscopyImage(
-                path=acquisition.path, data=td, channel_names=acquisition.channel_names
-            ),
-            ty, tx,
-        )
-        for td, ty, tx in tile_iter
-    ]
-    all_masks = segmenter.segment_batch(
-        [ta.channel(reference.channel) for ta, _, _ in tile_acqs],
-        diameter=reference.diameter,
-        flow_threshold=reference.flow_threshold,
-        cellprob_threshold=reference.cellprob_threshold,
-        min_size=reference.min_size,
-        normalize=reference.normalize,
-    )
-
-    tables: list[pd.DataFrame] = []
-    mask_paths: list[Path] = []
-    seg_paths: list[Path] = []
-    tile_masks_buffer: list[tuple[int, int, np.ndarray]] = []
-
-    measure_iter: zip | tqdm = zip(tile_acqs, all_masks)
-    if len(tile_acqs) > 1:
-        measure_iter = tqdm(
-            measure_iter, total=len(tile_acqs), desc="measuring tiles", leave=False, unit="tile"
-        )
-    print(f"Starting tile measuring for {acquisition.path.name}")
-    for (tile_acq, tile_y, tile_x), masks in measure_iter:
-        table, tile_seg_paths = _measure_tile(
-            tile_acq, masks, tile_y, tile_x, acquisition.path, reference, config
-        )
-        table.insert(0, "reference_set", reference.name)
-        table.insert(0, "source", acquisition.path.name)
-        tables.append(table)
-        seg_paths.extend(tile_seg_paths)
-
-    print(f"Tile measuring complete for {acquisition.path.name}, starting saving segmentations")
-
-    save_seg_iter = tqdm(
-        zip(tile_acqs, all_masks), total=len(tile_acqs), desc="saving segmentations", leave=False, unit="tile"
-    )
-    for (tile_acq, tile_y, tile_x), masks in save_seg_iter:
-        if config.save_masks:
-            if config.stitch_masks:
-                tile_masks_buffer.append((tile_y, tile_x, masks))
-            elif config.tile_size is not None:
-                destination = (
-                    mask_dir
-                    / f"{_safe_stem(acquisition.path)}__{reference.name}"
-                    f"__tile_y{tile_y}_x{tile_x}_masks.tif"
-                )
-                tifffile.imwrite(destination, masks, compression="zlib")
-                mask_paths.append(destination)
-            else:
-                destination = (
-                    mask_dir / f"{_safe_stem(acquisition.path)}__{reference.name}_masks.tif"
-                )
-                tifffile.imwrite(destination, masks, compression="zlib")
-                mask_paths.append(destination)
-
-    if config.stitch_masks and config.save_masks and tile_masks_buffer:
-        img_h, img_w = acquisition.data.shape[1:]
-        stitched = stitch_masks((img_h, img_w), tile_masks_buffer)
-        destination = mask_dir / f"{_safe_stem(acquisition.path)}__{reference.name}_masks.tif"
-        tifffile.imwrite(destination, stitched.astype(np.uint32), compression="zlib")
-        mask_paths.append(destination)
-
-    return tables, mask_paths, seg_paths
-
-
-def _measure_tile(  # pylint: disable=too-many-arguments
-    tile_acq: MicroscopyImage,
     masks: np.ndarray,
-    tile_y: int,
-    tile_x: int,
-    path: Path,
     reference: ReferenceSet,
-    config: AnalysisConfig,
-) -> tuple[pd.DataFrame, list[Path]]:
-    """Compute measurements and optional QC output for one pre-segmented tile."""
-    signal_data = {
-        spec.name: (tile_acq.channel(spec.channel), spec)
-        for spec in config.signal_channels
-    }
-    reference_image = tile_acq.channel(reference.channel)
+    signal_channels: Sequence[SignalChannel],
+    tissue: np.ndarray | None = None,
+    morphology_properties: tuple[str, ...] | list[str] | None = None,
+    promote_2d_to_3d: bool = False,
+) -> tuple[pd.DataFrame, dict[str, dict]]:
+    """Estimate each signal's background, then measure raw channels once.
+
+    ``tissue`` is an optional raw DAPI/tissue image, not a boolean mask.
+    A per-signal tissue_channel overrides it. Full methods require that input;
+    scalar and no-subtraction methods do not. Diagnostics are returned alongside
+    the table for QC of the exact pixels used by measurement.
+    """
+    reference_image = _align_image_to_masks(
+        acquisition.channel(reference.channel),
+        masks,
+        image_name=f"reference channel {reference.name!r}",
+        promote_2d_to_3d=promote_2d_to_3d,
+    )
+    shared_tissue = (
+        None
+        if tissue is None
+        else _align_image_to_masks(
+            tissue,
+            masks,
+            image_name="configured tissue channel",
+            promote_2d_to_3d=promote_2d_to_3d,
+        )
+    )
+    signal_data = {}
+    for spec in signal_channels:
+        signal_data[spec.name] = (
+            _align_image_to_masks(
+                acquisition.channel(spec.channel),
+                masks,
+                image_name=f"signal channel {spec.name!r}",
+                promote_2d_to_3d=promote_2d_to_3d,
+            ),
+            spec,
+        )
+
+    backgrounds = {}
+    for name, (signal, spec) in signal_data.items():
+        tissue_image = (
+            _align_image_to_masks(
+                acquisition.channel(spec.tissue_channel),
+                masks,
+                image_name=f"signal tissue channel for {spec.name!r}",
+                promote_2d_to_3d=promote_2d_to_3d,
+            )
+            if spec.tissue_channel is not None
+            else shared_tissue
+        )
+
+        backgrounds[name] = compute_background(
+            signal, masks, dapi=tissue_image, reference=reference_image, spec=spec
+        )
+
     table = measure_masks(
         reference_image=reference_image,
         masks=masks,
         signal_data=signal_data,
-        tile_yx=(tile_y, tile_x),
+        backgrounds=backgrounds,
+        morphology_properties=morphology_properties,
     )
+    return table, backgrounds
 
-    seg_paths: list[Path] = []
-    if config.save_segmentation:
-        qc_dir = (
-            config.segmentation_output_dir
-            if config.segmentation_output_dir is not None
-            else config.output_dir / "segmentation_qc"
-        )
-        tile_suffix = f"__tile_y{tile_y}_x{tile_x}" if config.tile_size is not None else ""
-        for signal_spec in config.signal_channels:
-            name = (
-                f"{_safe_name(_safe_stem(path))}__"
-                f"{_safe_name(reference.name)}__"
-                f"{_safe_name(signal_spec.name)}_segmentation"
-                f"{tile_suffix}"
-            )
-            seg_paths.extend(
-                save_segmentation_views(
-                    reference_image,
-                    masks,
-                    signal_data[signal_spec.name][0],
-                    output_dir=qc_dir,
-                    name=name,
-                    signal_spec=signal_spec,
-                    title=(
-                        f"{path.name} | reference={reference.name} | "
-                        f"signal={signal_spec.name}"
-                        + (
-                            f" | tile y={tile_y} x={tile_x}"
-                            if config.tile_size is not None
-                            else ""
-                        )
-                    ),
-                )
-            )
 
-    return table, seg_paths
+def _free_gpu_cache() -> None:
+    """Release cached GPU allocations between full-resolution images."""
+    try:
+        import torch  # pylint: disable=import-outside-toplevel
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
 
 
 def _reader(config: AnalysisConfig) -> ImageReader:
-    """Construct an ImageReader from the projection/scene/time settings in config."""
-    return ImageReader(
-        time_index=config.time_index,
-        scene_index=config.scene_index,
-        z_projection=config.z_projection,
-    )
+    return ImageReader(time_index=config.time_index, scene_index=config.scene_index, z_projection=config.z_projection)
 
 
-def build_dataset(
-    config: AnalysisConfig, paths: list[Path] | None = None
-) -> ImageDataset:
-    """Create the transform-aware dataset used by inspection, analysis, and QC."""
+def build_dataset(config: AnalysisConfig, paths: list[Path] | None = None) -> ImageDataset:
+    """Create the transform-aware dataset used by inspection and analysis."""
     return ImageDataset(
         paths if paths is not None else _input_paths(config),
         reader=_reader(config),
@@ -325,29 +299,21 @@ def build_dataset(
 
 
 def _input_paths(config: AnalysisConfig) -> list[Path]:
-    """Return every image path under input_dir that is not inside output_dir or excluded."""
+    """Return input images excluding outputs and user-provided patterns."""
     output = config.output_dir.resolve()
     return [
         path
-        for path in discover_images(
-            config.input_dir,
-            extensions=config.extensions,
-            recursive=config.recursive,
-        )
-        if not path.resolve().is_relative_to(output)
-        and not _is_excluded(path, config)
+        for path in discover_images(config.input_dir, extensions=config.extensions, recursive=config.recursive)
+        if not path.resolve().is_relative_to(output) and not _is_excluded(path, config)
     ]
 
 
 def _is_excluded(path: Path, config: AnalysisConfig) -> bool:
-    """Return whether a discovered image matches an exclusion name or glob."""
     if not config.exclude:
         return False
-
     resolved = path.resolve().as_posix().casefold()
     relative = path.resolve().relative_to(config.input_dir.resolve()).as_posix().casefold()
-    name = path.name.casefold()
-    candidates = (name, relative, resolved)
+    candidates = (path.name.casefold(), relative, resolved)
     return any(
         fnmatchcase(candidate, str(pattern).replace("\\", "/").casefold())
         for pattern in config.exclude
@@ -356,17 +322,12 @@ def _is_excluded(path: Path, config: AnalysisConfig) -> bool:
 
 
 def _safe_stem(path: Path) -> str:
-    """Return the filename stem with known multi-part microscopy extensions stripped."""
     name = path.name
     for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif", ".czi", ".oir"):
         if name.casefold().endswith(suffix):
-            return name[: -len(suffix)]
+            return name[:-len(suffix)]
     return path.stem
 
 
 def _safe_name(value: str) -> str:
-    """Replace characters that are not alphanumeric, hyphens, or underscores with underscores."""
-    return "".join(
-        character if character.isalnum() or character in "-_" else "_"
-        for character in value
-    )
+    return "".join(character if character.isalnum() or character in "-_" else "_" for character in value)

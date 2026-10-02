@@ -92,6 +92,8 @@ def _validate_analysis(config: AnalysisConfig) -> None:
         raise ElabError("analysis.device must be auto, cpu, mps, cuda, or cuda:N.")
     if not config.extensions or any(not str(extension).startswith(".") for extension in config.extensions):
         raise ElabError("analysis.extensions must contain dot-prefixed filename extensions.")
+    if config.tissue_channel is not None:
+        _validate_channel(config.tissue_channel.channel, "configured tissue channel")
     for reference in config.reference_sets:
         _validate_channel(reference.channel, f"reference {reference.name!r}")
         if reference.diameter is not None and reference.diameter <= 0:
@@ -100,12 +102,14 @@ def _validate_analysis(config: AnalysisConfig) -> None:
             raise ElabError(f"Reference {reference.name!r} min_size cannot be negative.")
     for signal in config.signal_channels:
         _validate_channel(signal.channel, f"signal {signal.name!r}")
-        if signal.threshold_method not in {"otsu", "percentile", "absolute", "none"}:
+        if signal.threshold_method not in {"otsu", "percentile", "absolute", "percent_of_max", "none"}:
             raise ElabError(f"Signal {signal.name!r} has an unsupported threshold method.")
         if signal.threshold_method == "absolute" and signal.threshold_value is None:
             raise ElabError(f"Signal {signal.name!r} requires threshold_value for absolute thresholding.")
         if not 0 <= signal.positive_fraction_cutoff <= 1:
             raise ElabError(f"Signal {signal.name!r} positive_fraction_cutoff must be between 0 and 1.")
+        if signal.tissue_channel is not None:
+            _validate_channel(signal.tissue_channel, f"tissue channel for signal {signal.name!r}")
 
 
 def _validate_channel(value: int | str, label: str) -> None:

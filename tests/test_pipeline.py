@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import tifffile
 
 from colocalize.datasets import AnalysisConfig, ReferenceSet, SignalChannel
-from colocalize.pipeline import _input_paths, run_analysis
+from colocalize.pipeline import _input_paths, _save_mask, _save_segmentation_qc, run_analysis
 from colocalize.readers import MicroscopyImage
 
 
@@ -112,3 +113,35 @@ def test_run_analysis_saves_grid_and_panels_for_every_input_image(
     assert all(path.is_file() for path in result.segmentation_paths)
     assert {path.parent for path in result.segmentation_paths} == {qc_dir}
     assert sum(path.name.endswith("__grid.png") for path in result.segmentation_paths) == 2
+
+
+def test_save_mask_writes_a_lossless_label_tiff(tmp_path):
+    masks = np.asarray([[0, 1], [2, 2]], dtype=np.int32)
+    destination = _save_mask(
+        masks=masks,
+        acquisition_path=tmp_path / "retina.ome.tif",
+        reference=ReferenceSet(name="RGCs", channel=0),
+        output_dir=tmp_path / "masks",
+    )
+
+    assert destination.name == "retina__RGCs_masks.tif"
+    assert np.array_equal(tifffile.imread(destination), masks)
+
+
+def test_save_segmentation_qc_writes_all_views_for_each_signal(tmp_path):
+    acquisition = MicroscopyImage(
+        path=tmp_path / "retina.tif",
+        data=np.stack([np.arange(16).reshape(4, 4), np.arange(16, 32).reshape(4, 4)]),
+        channel_names=("reference", "signal"),
+    )
+
+    saved = _save_segmentation_qc(
+        acquisition=acquisition,
+        masks=np.asarray([[0, 0, 0, 0], [0, 1, 1, 0]] * 2),
+        reference=ReferenceSet(name="cells", channel=0),
+        signal_channels=[SignalChannel(name="marker", channel=1)],
+        output_dir=tmp_path / "qc",
+    )
+
+    assert len(saved) == 5
+    assert all(path.is_file() for path in saved)
